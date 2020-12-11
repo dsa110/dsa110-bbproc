@@ -1,0 +1,40 @@
+
+--> copy them over (or process on the various nodes)
+scp ubuntu@corr01:/home/ubuntu/data/fl_48.out ./corr01.out &
+scp ubuntu@corr02:/home/ubuntu/data/fl_47.out ./corr02.out &
+scp ubuntu@corr03:/home/ubuntu/data/fl_48.out ./corr03.out &
+scp ubuntu@corr21:/home/ubuntu/data/fl_47.out ./corr21.out &
+scp ubuntu@corr05:/home/ubuntu/data/fl_47.out ./corr05.out &
+scp ubuntu@corr06:/home/ubuntu/data/fl_50.out ./corr06.out &
+scp ubuntu@corr07:/home/ubuntu/data/fl_47.out ./corr07.out &
+scp ubuntu@corr08:/home/ubuntu/data/fl_48.out ./corr08.out &
+scp ubuntu@corr09:/home/ubuntu/data/fl_47.out ./corr09.out &
+scp ubuntu@corr10:/home/ubuntu/data/fl_47.out ./corr10.out &
+scp ubuntu@corr11:/home/ubuntu/data/fl_47.out ./corr11.out &
+scp ubuntu@corr12:/home/ubuntu/data/fl_47.out ./corr12.out &
+scp ubuntu@corr13:/home/ubuntu/data/fl_50.out ./corr13.out &
+scp ubuntu@corr14:/home/ubuntu/data/fl_46.out ./corr14.out &
+scp ubuntu@corr15:/home/ubuntu/data/fl_48.out ./corr15.out &
+scp ubuntu@corr16:/home/ubuntu/data/fl_49.out ./corr16.out &
+
+./beamformer -d ./data/corr01.out -f /home/user/beamformer_weights/beamformer_weights_corr01.dat -o ./data/corr01.fil -z 1498.75 -s 1.4 -n 136 &
+./beamformer -d ./data/corr02.out -f /home/user/beamformer_weights/beamformer_weights_corr02.dat -o ./data/corr02.fil -z 1487.03125 -s 1.4 -n 136 &
+./beamformer -d ./data/corr03.out -f /home/user/beamformer_weights/beamformer_weights_corr03.dat -o ./data/corr03.fil -z 1475.3125 -s 1.4 -n 136 &
+./beamformer -d ./data/corr21.out -f /home/user/beamformer_weights/beamformer_weights_corr21.dat -o ./data/corr21.fil -z 1463.59375 -s 1.4 -n 136 &
+./beamformer -d ./data/corr05.out -f /home/user/beamformer_weights/beamformer_weights_corr05.dat -o ./data/corr05.fil -z 1451.875 -s 1.4 -n 136 &
+./beamformer -d ./data/corr06.out -f /home/user/beamformer_weights/beamformer_weights_corr06.dat -o ./data/corr06.fil -z 1440.15625 -s 1.4 -n 136 &
+./beamformer -d ./data/corr07.out -f /home/user/beamformer_weights/beamformer_weights_corr07.dat -o ./data/corr07.fil -z 1428.4375 -s 1.4 -n 136 &
+./beamformer -d ./data/corr08.out -f /home/user/beamformer_weights/beamformer_weights_corr08.dat -o ./data/corr08.fil -z 1416.71875 -s 1.4 -n 136 &
+./beamformer -d ./data/corr09.out -f /home/user/beamformer_weights/beamformer_weights_corr09.dat -o ./data/corr09.fil -z 1405.0 -s 1.4 -n 136 &
+./beamformer -d ./data/corr10.out -f /home/user/beamformer_weights/beamformer_weights_corr10.dat -o ./data/corr10.fil -z 1393.28125 -s 1.4 -n 136 &
+./beamformer -d ./data/corr11.out -f /home/user/beamformer_weights/beamformer_weights_corr11.dat -o ./data/corr11.fil -z 1381.5625 -s 1.4 -n 136 &
+./beamformer -d ./data/corr12.out -f /home/user/beamformer_weights/beamformer_weights_corr12.dat -o ./data/corr12.fil -z 1369.84375 -s 1.4 -n 136 &
+./beamformer -d ./data/corr13.out -f /home/user/beamformer_weights/beamformer_weights_corr13.dat -o ./data/corr13.fil -z 1358.125 -s 1.4 -n 136 &
+./beamformer -d ./data/corr14.out -f /home/user/beamformer_weights/beamformer_weights_corr14.dat -o ./data/corr14.fil -z 1346.40625 -s 1.4 -n 136 &
+./beamformer -d ./data/corr15.out -f /home/user/beamformer_weights/beamformer_weights_corr15.dat -o ./data/corr15.fil -z 1334.6875 -s 1.4 -n 136 &
+./beamformer -d ./data/corr16.out -f /home/user/beamformer_weights/beamformer_weights_corr16.dat -o ./data/corr16.fil -z 1322.96875 -s 1.4 -n 136 &
+
+python splicer.py 17160.4 136 ./data/spliced.fil ./data/corr01.fil ./data/corr02.fil ./data/corr03.fil ./data/corr21.fil ./data/corr05.fil ./data/corr06.fil ./data/corr07.fil ./data/corr08.fil ./data/corr09.fil ./data/corr10.fil ./data/corr11.fil ./data/corr12.fil ./data/corr13.fil ./data/corr14.fil ./data/corr15.fil ./data/corr16.fil 
+
+
+
