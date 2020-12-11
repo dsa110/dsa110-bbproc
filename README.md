@@ -11,3 +11,8 @@ produces beamformed binary file from voltage data
 	   -s interbeam separation in arcmin [default 1.4]
 	   -n beam number [0 -- 255, default 127]
 	   -h print usage
+
+# findfile.py
+finds a voltage file associated with a trigger (T2 specnum)
+ [1] directory with all voltage files and dump.dat
+ [2] T2 specnum associated with trigger of interest
