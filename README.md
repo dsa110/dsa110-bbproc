@@ -14,5 +14,6 @@ produces beamformed binary file from voltage data
 
 # findfile.py
 finds a voltage file associated with a trigger (T2 specnum)
- [1] directory with all voltage files and dump.dat
- [2] T2 specnum associated with trigger of interest
+  -- directory with all voltage files and dump.dat
+  -- T2 specnum associated with trigger of interest
+
