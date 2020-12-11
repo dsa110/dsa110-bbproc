@@ -17,3 +17,6 @@ finds a voltage file associated with a trigger (T2 specnum)
   -- directory with all voltage files and dump.dat
   -- T2 specnum associated with trigger of interest
 
+# plot_spliced.py
+plots spectrogram, time series, and spectrum of integrated spliced data (417 channels averaged, 60 time samples averaged)
+	-- spliced file name
