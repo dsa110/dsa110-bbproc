@@ -20,3 +20,14 @@ finds a voltage file associated with a trigger (T2 specnum)
 # plot_spliced.py
 plots spectrogram, time series, and spectrum of integrated spliced data (417 channels averaged, 60 time samples averaged)
 	-- spliced file name
+
+# dsacorr.c
+
+correlator, produces correlated data from a voltage data file.
+arguments : input file, output file, time resolution, frequency resolution
+output file has structure:
+for each time:
+for each frequency channel:
+{autocorrelations (antennas, uint8),
+cross correlations (antenna1, antenna2, re/im, int8)}:
+polarization
