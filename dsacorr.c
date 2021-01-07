@@ -164,10 +164,10 @@ int main (int argc, char *argv[]) {
 								in2ry = (float)(((char)((input[nant2*(nChans*nTimes*nPols)+nfr*(nTimes*nPols)+nt*nPols+1] & 15) << 4)) >> 4);
 								in2iy = (float)(((char)((input[nant2*(nChans*nTimes*nPols)+nfr*(nTimes*nPols)+nt*nPols+1] & 240))) >> 4);
 								
-								corrs[ nfr*(nAnts*(nAnts-1)/2*nPols) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2    ] += (char)(in1rx*in2rx - in1ix*in2ix);
-								corrs[ nfr*(nAnts*(nAnts-1)/2*nPols) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 1] += (char)(in1rx*in2ix + in1ix*in2rx);
-								corrs[ nfr*(nAnts*(nAnts-1)/2*nPols) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 2] += (char)(in1ry*in2ry - in1iy*in2iy);
-								corrs[ nfr*(nAnts*(nAnts-1)/2*nPols) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 3] += (char)(in1ry*in2iy + in1iy*in2ry);
+								corrs[ nfr*(nAnts*(nAnts-1)/2*nPols) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2    ] += (char)(in1rx*in2rx + in1ix*in2ix);
+								corrs[ nfr*(nAnts*(nAnts-1)/2*nPols) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 1] += (char)(-in1rx*in2ix + in1ix*in2rx);
+								corrs[ nfr*(nAnts*(nAnts-1)/2*nPols) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 2] += (char)(in1ry*in2ry + in1iy*in2iy);
+								corrs[ nfr*(nAnts*(nAnts-1)/2*nPols) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 3] += (char)(-in1ry*in2iy + in1iy*in2ry);
 								
 								
 							}
