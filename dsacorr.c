@@ -140,7 +140,7 @@ int main (int argc, char *argv[]) {
 	
 	for(timeslo = 0; timeslo < (int)(nTotSam/nTimeSam); timeslo++) {
 		
-		printf("writing time sample %d / %d\n", timeslo+1, (int)(nTotSam/nTimeSam));
+//		printf("writing time sample %d / %d\n", timeslo+1, (int)(nTotSam/nTimeSam));
 		
 		memset(autos,0,(int)(nChans*nAnts*nPols));
 		memset(corrs,0,(int)(nChans*nAnts*(nAnts-1)/2*nPols*2));
