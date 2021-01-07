@@ -52,7 +52,7 @@ int main (int argc, char *argv[]) {
 	fout=(char *)malloc(sizeof(char)*100);
 	sprintf(fout,"nofile");
 	
-	while ((arg=getopt(argc,argv,"d:f:o:z:s:n:h")) != -1)
+	while ((arg=getopt(argc,argv,"d:o:t:f:h")) != -1)
 	{
 		switch (arg)
 		{
@@ -110,9 +110,10 @@ int main (int argc, char *argv[]) {
 	rewind(ptr);
 	int nTotSam = (int)(floor(sz / (nAnts*nChans*nTimes*nPols)));
 	
-	// compute beamformer weights
 	char * corrs = (char *)malloc(sizeof(char)*(int)(nChans*nAnts*(nAnts-1)/2*nPols*2));
 	unsigned char * autos = (unsigned char *)malloc(sizeof(char)*(int)(nChans*nAnts*nPols));
+	
+	
 	unsigned char * input = (unsigned char *)malloc(sizeof(char)*nAnts*nChans*nTimes*nPols);
 	
 	/* autos : [time, chan, antenna, pol] */
@@ -121,20 +122,31 @@ int main (int argc, char *argv[]) {
 	int nTimeSam = (int)ceil((double)(fInt / (2./fDF/1000.)));	// number of time integration
 	if (nTimeSam > nTotSam) nTimeSam = nTotSam;
 	if (nTimeSam <= 0) nTimeSam = 1;
-	int nFreqsSam = (int)ceil((double)(fRes / fDF));	// number of frequency integration
+	int nFreqsSam = (int)floor((double)(fRes / fDF));	// number of frequency integration
 	if (nFreqsSam > nChans) nFreqsSam = nChans;
 	if (nFreqsSam <= 0) nFreqsSam = 1;
 	
+	// find averages over freq channels so that all channels are used
+	int idx = 0;
+	while(nChans%(nFreqsSam+idx) != 0) idx++;
+	nFreqsSam = nFreqsSam+idx;
+	
+	// arrays to be written
+	char * corrswrite = (char *)malloc(sizeof(char)*(int)(nChans/nFreqsSam*nAnts*(nAnts-1)/2*nPols*2));
+	unsigned char * autoswrite = (unsigned char *)malloc(sizeof(char)*(int)(nChans/nFreqsSam*nAnts*nPols));
+	
 	float in1rx, in1ix, in1ry, in1iy;
 	float in2rx, in2ix, in2ry, in2iy;
-	int i, nSam, nt, nfr, npl, nant1, nant2, timeslo;
+	int i, j, nSam, nt, nfr, npl, nant1, nant2, timeslo;
 	
 	printf("\n");
-	printf("processing file %s\n", fdata);
-	printf("found %d time samples\n", nTotSam);
-	printf("writing to file %s\n", fout);
-	printf("time resolution : %f ms\n", nTimeSam * 2./fDF/1000.);
-	printf("frequency resolution : %f MHz\n", nFreqsSam * fDF);
+	printf("processing file %s.\n", fdata);
+	printf("found %d time samples.\n", nTotSam);
+	printf("writing to file %s.\n", fout);
+	printf("time resolution : %f ms.\n", nTimeSam * 2./fDF/1000.);
+	printf("averaging %d time samples together.\n", (int)(nTimeSam*2));
+	printf("frequency resolution : %f MHz.\n", nFreqsSam * fDF);
+	printf("averaging %d frequency channels together.\n", nFreqsSam);
 	printf("\n");
 	
 	
@@ -164,10 +176,10 @@ int main (int argc, char *argv[]) {
 								in2ry = (float)(((char)((input[nant2*(nChans*nTimes*nPols)+nfr*(nTimes*nPols)+nt*nPols+1] & 15) << 4)) >> 4);
 								in2iy = (float)(((char)((input[nant2*(nChans*nTimes*nPols)+nfr*(nTimes*nPols)+nt*nPols+1] & 240))) >> 4);
 								
-								corrs[ nfr*(nAnts*(nAnts-1)/2*nPols) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2    ] += (char)(in1rx*in2rx + in1ix*in2ix);
-								corrs[ nfr*(nAnts*(nAnts-1)/2*nPols) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 1] += (char)(-in1rx*in2ix + in1ix*in2rx);
-								corrs[ nfr*(nAnts*(nAnts-1)/2*nPols) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 2] += (char)(in1ry*in2ry + in1iy*in2iy);
-								corrs[ nfr*(nAnts*(nAnts-1)/2*nPols) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 3] += (char)(-in1ry*in2iy + in1iy*in2ry);
+								corrs[ nfr*(nAnts*(nAnts-1)/2*nPols*2) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2    ] += (char)(in1rx*in2rx + in1ix*in2ix);
+								corrs[ nfr*(nAnts*(nAnts-1)/2*nPols*2) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 1] += (char)(-in1rx*in2ix + in1ix*in2rx);
+								corrs[ nfr*(nAnts*(nAnts-1)/2*nPols*2) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 2] += (char)(in1ry*in2ry + in1iy*in2iy);
+								corrs[ nfr*(nAnts*(nAnts-1)/2*nPols*2) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 3] += (char)(-in1ry*in2iy + in1iy*in2ry);
 								
 								
 							}
@@ -176,11 +188,29 @@ int main (int argc, char *argv[]) {
 				}
 			}
 		}
-		for (i = 0; i < nChans*nAnts*nPols; i++) autos[i] = (char)(autos[i] / nTimes / nTimeSam);
-		for (i = 0; i < nChans*nAnts*(nAnts-1)/2*nPols*2; i++) corrs[i] = (char)(corrs[i] / nTimes / nTimeSam);
-		for (i = 0; i < nChans; i++) {
-			fwrite(&autos[i*nAnts*nPols],nAnts*nPols,1,write_ptr);
-			fwrite(&corrs[i*nAnts*(nAnts-1)/2*nPols*2],nAnts*(nAnts-1)/2*nPols*2,1,write_ptr);
+		// average over frequencies
+		memset(autoswrite,0,(int)(nChans/nFreqsSam*nAnts*nPols));
+		memset(corrswrite,0,(int)(nChans/nFreqsSam*nAnts*(nAnts-1)/2*nPols*2));
+		for (i = 0; i < (int)(nChans/nFreqsSam); i++){
+			for (j = 0; j < nFreqsSam; j++){
+				for (nant1 = 0; nant1 < nAnts; nant1++) {
+					autoswrite[i*nAnts*nPols+nant1*nPols] += autos[(i*nFreqsSam+j)*nAnts*nPols+nant1*nPols];
+					autoswrite[i*nAnts*nPols+nant1*nPols+1] += autos[(i*nFreqsSam+j)*nAnts*nPols+nant1*nPols+1];
+					for (nant2 = nant1+1; nant2 < nAnts; nant2++) {
+						corrswrite[i*(nAnts*(nAnts-1)/2*nPols*2) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2    ] += corrs[ (i*nFreqsSam+j)*(nAnts*(nAnts-1)/2*nPols*2) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2    ];
+						corrswrite[i*(nAnts*(nAnts-1)/2*nPols*2) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 1] += corrs[ (i*nFreqsSam+j)*(nAnts*(nAnts-1)/2*nPols*2) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 1];
+						corrswrite[i*(nAnts*(nAnts-1)/2*nPols*2) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 2] += corrs[ (i*nFreqsSam+j)*(nAnts*(nAnts-1)/2*nPols*2) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 2];
+						corrswrite[i*(nAnts*(nAnts-1)/2*nPols*2) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 3] += corrs[ (i*nFreqsSam+j)*(nAnts*(nAnts-1)/2*nPols*2) + ((nAnts-1)*nAnts/2 - (nAnts-1-nant1)*(nAnts-nant1)/2 + nant2 - (nant1+1))*nPols*2 + 3];
+					}
+				}
+			}
+		}
+		
+		for (i = 0; i < nChans/nFreqsSam*nAnts*nPols; i++) autoswrite[i] = (char)(autoswrite[i] / nTimes / nTimeSam / nFreqsSam);
+		for (i = 0; i < nChans/nFreqsSam*nAnts*(nAnts-1)/2*nPols*2; i++) corrswrite[i] = (char)(corrswrite[i] / nTimes / nTimeSam / nFreqsSam);
+		for (i = 0; i < nChans/nFreqsSam; i++) {
+			fwrite(&autoswrite[i*nAnts*nPols],nAnts*nPols,1,write_ptr);
+			fwrite(&corrswrite[i*nAnts*(nAnts-1)/2*nPols*2],nAnts*(nAnts-1)/2*nPols*2,1,write_ptr);
 		}
 	}
 
