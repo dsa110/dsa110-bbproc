@@ -1,7 +1,5 @@
 /*
-
 gcc -o beamformer beamformer.c -I/usr/local/include -L/usr/local/lib -lm -g -O2 -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran
-
 python beamformer was too slow, decided to use python to write up header etc but do actual beamforming in C.
 This code should take 5 parameters:
 * data file name
@@ -10,9 +8,10 @@ This code should take 5 parameters:
 * separation
 * beam number
 * output file name
-
 assumes 48 channels for beamformer (weights for 8 data channels), ONLY 1 beam
 
+greg hellbourg
+ghellbourg@astro.caltech.edu
 */
 
 
@@ -89,10 +88,12 @@ void beamformer(char *input, float *wr, float *wi, unsigned char *output) {
 	float inr_x, ini_x, inr_y, ini_y;
 	float wrx, wix, wry, wiy;
 	float rx, ix, ry, iy;
+	float tmp;
 	
 	for(int nTime=0;nTime<2;nTime++){
 		for(int nChan=0;nChan<48;nChan++){
 			for(int i=0;i<8;i++){
+				tmp = 0;
 				for(int nAnt=0;nAnt<24;nAnt++){
 					inr_x = (float)(((char)((input[nAnt*(384*2*2)+(nChan*8+i)*(2*2)+nTime*2] & 15) << 4)) >> 4);
 					ini_x = (float)(((char)((input[nAnt*(384*2*2)+(nChan*8+i)*(2*2)+nTime*2] & 240))) >> 4);
@@ -109,8 +110,9 @@ void beamformer(char *input, float *wr, float *wi, unsigned char *output) {
 					ry = inr_y*wry - ini_y*wiy;
 					iy = inr_y*wiy + ini_y*wry;
 					
-					output[nTime*384+nChan*8+i] = (unsigned char)(rx*rx+ix*ix+ry*ry+iy*iy);
+					tmp += (rx*rx+ix*ix+ry*ry+iy*iy) / 24;
 				}
+				output[nTime*384+nChan*8+i] = (unsigned char)tmp;
 			}
 		}
 	}
@@ -141,13 +143,13 @@ int main (int argc, char *argv[]) {
 	float sep = 1.4;
 	int nBeamNum = 127;
 	char * fnam;
-	fnam=(char *)malloc(sizeof(char)*100);
+	fnam=(char *)malloc(sizeof(char)*200);
 	sprintf(fnam,"nofile");
 	char * fdata;
-	fdata=(char *)malloc(sizeof(char)*100);
+	fdata=(char *)malloc(sizeof(char)*200);
 	sprintf(fdata,"nofile");
 	char * fout;
-	fout=(char *)malloc(sizeof(char)*100);
+	fout=(char *)malloc(sizeof(char)*200);
 	sprintf(fout,"nofile");
 	
 	while ((arg=getopt(argc,argv,"d:f:o:z:s:n:h")) != -1)
