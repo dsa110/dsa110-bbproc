@@ -9,7 +9,6 @@ This code should take 5 parameters:
 * beam number
 * output file name
 assumes 48 channels for beamformer (weights for 8 data channels), ONLY 1 beam
-
 greg hellbourg
 ghellbourg@astro.caltech.edu
 */
@@ -105,10 +104,10 @@ void beamformer(char *input, float *wr, float *wi, unsigned char *output) {
 					wry = wr[nAnt*(48*2)+nChan*2+1];
 					wiy = wi[nAnt*(48*2)+nChan*2+1];
 					
-					rx = inr_x*wrx - ini_x*wix;
-					ix = inr_x*wix + ini_x*wrx;
-					ry = inr_y*wry - ini_y*wiy;
-					iy = inr_y*wiy + ini_y*wry;
+					rx = inr_x*wrx + ini_x*wix;
+					ix = -inr_x*wix + ini_x*wrx;
+					ry = inr_y*wry + ini_y*wiy;
+					iy = -inr_y*wiy + ini_y*wry;
 					
 					tmp += (rx*rx+ix*ix+ry*ry+iy*iy) / 24;
 				}
@@ -246,7 +245,7 @@ int main (int argc, char *argv[]) {
 	for (int i=0;i<384;i++) freqs[i] = (fch1 - i*250./8192.)*1e6;
 	init_weights(fnam,antpos,weights);
 	calc_weights(antpos,weights,freqs,wr,wi,sep,nBeamNum);
-
+ 
 	FILE *ptr;
 	FILE *write_ptr;
 	ptr = fopen(fdata,"rb");  // r for read, b for binary
