@@ -239,8 +239,8 @@ int main (int argc, char *argv[]) {
 	
 	
 	// compute beamformer weights
-	unsigned char * output = (char *)malloc(sizeof(char)*nChans*nTimes);
-	unsigned char * input = (char *)malloc(sizeof(char)*nAnts*nChans*nTimes*nPols);
+	unsigned char * output = (unsigned char *)malloc(sizeof(unsigned char)*nChans*nTimes);
+	unsigned char * input = (unsigned char *)malloc(sizeof(unsigned char)*nAnts*nChans*nTimes*nPols);
 	float * antpos = (float *)malloc(sizeof(float)*64); // easting
 	float * weights = (float *)malloc(sizeof(float)*64*NW*nPols*2); // complex weights [ant, NW, pol, r/i]
 	float * wr = (float *)malloc(sizeof(float)*64*NW*nPols); // complex weights [ant, NW, pol]
