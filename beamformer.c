@@ -28,7 +28,7 @@ ghellbourg@astro.caltech.edu
 
 int NW = 48;	// number of channels for the beamformer
 float PI = 3.141592653589793238;
-float CVAC = 299792458;
+float CVAC = 299792458.0;
 
 
 
