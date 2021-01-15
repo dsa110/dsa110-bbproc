@@ -78,7 +78,17 @@ void calc_weights(float *antpos, float *weights, float *freqs, float *wr, float 
 			}
 		}
 	}
-
+	
+/*	FILE *write_ptr;
+	
+	char filename[20];
+	sprintf( filename, "./beamweights_%d", nBeamNum );
+	
+	write_ptr = fopen(filename,"wb");  // w for write, b for binary
+	fwrite(wr,sizeof(float),64*48*2,write_ptr);
+	fwrite(wi,sizeof(float),64*48*2,write_ptr);
+	fclose(write_ptr);
+*/
 
 }
 
