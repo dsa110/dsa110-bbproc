@@ -114,10 +114,10 @@ void beamformer(char *input, float *wr, float *wi, unsigned char *output) {
 					wry = wr[nAnt*(48*2)+nChan*2+1];
 					wiy = wi[nAnt*(48*2)+nChan*2+1];
 					
-					rx = inr_x*wrx + ini_x*wix;
-					ix = -inr_x*wix + ini_x*wrx;
-					ry = inr_y*wry + ini_y*wiy;
-					iy = -inr_y*wiy + ini_y*wry;
+					rx = inr_x*wrx - ini_x*wix;
+					ix = inr_x*wix + ini_x*wrx;
+					ry = inr_y*wry - ini_y*wiy;
+					iy = inr_y*wiy + ini_y*wry;
 					
 					tmp += (rx*rx+ix*ix+ry*ry+iy*iy) / 24;
 				}
