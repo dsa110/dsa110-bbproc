@@ -9,7 +9,6 @@ This code should take 5 parameters:
 * beam number
 * output file name
 assumes 48 channels for beamformer (weights for 8 data channels), ONLY 1 beam
-
 greg hellbourg
 ghellbourg@astro.caltech.edu
 */
@@ -79,17 +78,19 @@ void calc_weights(float *antpos, float *weights, float *freqs, float *wr, float 
 			}
 		}
 	}
-/*	FILE *write_ptr;
 	
-	char filename[20];
-	sprintf( filename, "./beamweights_%d", nBeamNum );
-	
-	write_ptr = fopen(filename,"wb");  // w for write, b for binary
+/* write beamformer weights, if needed -- can be made optional? */
+/*
+	FILE *write_ptr;
+	char filename[100];
+	sprintf(filename, "/home/user/T3_detect/testdir/beamweights_%d", nBeamNum);
+	write_ptr = fopen(filename,"wb");
 	fwrite(wr,sizeof(float),64*48*2,write_ptr);
 	fwrite(wi,sizeof(float),64*48*2,write_ptr);
 	fclose(write_ptr);
+	printf("wrote beamformer weights -- size = %d\n",(int)sizeof(float));
+	printf("data written as int -- size = %d\n",(int)sizeof(int));
 */
-
 
 }
 
@@ -98,36 +99,43 @@ void beamformer(char *input, float *wr, float *wi, unsigned char *output, int nC
 	float inr_x, ini_x, inr_y, ini_y;
 	float wrx, wix, wry, wiy;
 	float rx, ix, ry, iy;
-	float tmp;
+	float tmprealX, tmpimagX, tmprealY, tmpimagY;
 	
 	for(int nTime=0;nTime<nTimes;nTime++){
 		for(int nChan=0;nChan<48;nChan++){
 			for(int i=0;i<8;i++){
-				tmp = 0;
+				rx = 0;
+				ix = 0;
+				ry = 0;
+				iy = 0;
 				for(int nAnt=0;nAnt<nAnts;nAnt++){
 					inr_x = (float)(((char)((input[nAnt*(nChans*nPols*nTimes)+(nChan*8+i)*(nPols*nTimes)+nTime*2] & 15) << 4)) >> 4);
 					ini_x = (float)(((char)((input[nAnt*(nChans*nPols*nTimes)+(nChan*8+i)*(nPols*nTimes)+nTime*2] & 240))) >> 4);
 					inr_y = (float)(((char)((input[nAnt*(nChans*nPols*nTimes)+(nChan*8+i)*(nPols*nTimes)+nTime*2+1] & 15) << 4)) >> 4);
 					ini_y = (float)(((char)((input[nAnt*(nChans*nPols*nTimes)+(nChan*8+i)*(nPols*nTimes)+nTime*2+1] & 240))) >> 4);
 					
+					/***********/
+					/*towrite[nAnt*(nChans*nTimes*nPols*2)+(nChan*8+i)*(nPols*nTimes*2)+nTime*nPols*2  ] = (int)inr_x;
+					towrite[nAnt*(nChans*nTimes*nPols*2)+(nChan*8+i)*(nPols*nTimes*2)+nTime*nPols*2+1] = (int)ini_x;
+					towrite[nAnt*(nChans*nTimes*nPols*2)+(nChan*8+i)*(nPols*nTimes*2)+nTime*nPols*2+2] = (int)inr_y;
+					towrite[nAnt*(nChans*nTimes*nPols*2)+(nChan*8+i)*(nPols*nTimes*2)+nTime*nPols*2+3] = (int)ini_y;*/
+					/***********/
+										
 					wrx = wr[nAnt*(48*nPols)+nChan*nPols];
 					wix = wi[nAnt*(48*nPols)+nChan*nPols];
 					wry = wr[nAnt*(48*nPols)+nChan*nPols+1];
 					wiy = wi[nAnt*(48*nPols)+nChan*nPols+1];
 					
-					rx = inr_x*wrx - ini_x*wix;
-					ix = inr_x*wix + ini_x*wrx;
-					ry = inr_y*wry - ini_y*wiy;
-					iy = inr_y*wiy + ini_y*wry;
-					
-					tmp += (rx*rx+ix*ix+ry*ry+iy*iy) / nAnts;
+					rx += inr_x*wrx - ini_x*wix;
+					ix += inr_x*wix + ini_x*wrx;
+					ry += inr_y*wry - ini_y*wiy;
+					iy += inr_y*wiy + ini_y*wry;
+
 				}
-				output[nTime*nChans+nChan*8+i] = (unsigned char)tmp;
+				output[nTime*nChans+nChan*8+i] = (unsigned char)((rx*rx + ix*ix + ry*ry + iy*iy) / nAnts / nAnts);
 			}
 		}
 	}
-	
-	
 }
 
 void usage()
@@ -252,7 +260,8 @@ int main (int argc, char *argv[]) {
 	
 	
 	// compute beamformer weights
-	unsigned char * output = (char *)malloc(sizeof(char)*nChans*nPols);
+	//unsigned char * output = (char *)malloc(sizeof(char)*nChans*nTimes);
+	unsigned char * output = (unsigned char *)malloc(sizeof(unsigned char)*nChans*nTimes);
 	unsigned char * input = (char *)malloc(sizeof(char)*nAnts*nChans*nTimes*nPols);
 	float * antpos = (float *)malloc(sizeof(float)*64); // easting
 	float * weights = (float *)malloc(sizeof(float)*64*NW*nPols*2); // complex weights [ant, NW, pol, r/i]
@@ -281,7 +290,7 @@ int main (int argc, char *argv[]) {
 
 		beamformer(input,wr,wi,output,nChans,nAnts,nTimes,nPols);
 
-		fwrite(output,nChans*nTimes,1,write_ptr);
+		fwrite(output,sizeof(unsigned char),nChans*nTimes,write_ptr);
 		
 	}
 	fclose(ptr);
