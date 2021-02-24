@@ -16,23 +16,30 @@ import subprocess
 from sigpyproc.Readers import FilReader
 from pathlib import Path
 import time
+import json
 
 dirname  = sys.argv[1];
 calfile  = sys.argv[2]; # contains XX instead of corr number
-specnum  = int(sys.argv[3]);
-timehr   = float(sys.argv[4]);
-snr      = float(sys.argv[5]);
-dm       = float(sys.argv[6]);
-nBeamNum = int(sys.argv[7]);
+itime    = int(sys.argv[3]);
 
-# to test:
-# inp = '261840032 4.7667777777777784 39.512 25.2644 136 fl_48.out fl_47.out fl_48.out fl_47.out fl_47.out fl_50.out fl_47.out fl_48.out fl_47.out fl_47.out fl_47.out fl_47.out fl_50.out fl_46.out fl_48.out fl_49.out';
-# dirname = '09dec20';
-# specnum = int(inp.split()[0]);
-# dtime = float(inp.split()[1]);
-# snr = float(inp.split()[2]);
-# dm = float(inp.split()[3]);
-# nBeamNum = int(inp.split()[4]);
+fname = '/mnt/data/dsa110/T2/' + dirname + '/fl_output.dat';
+fil = open(fname);
+dat = fil.readlines();
+fil.close();
+
+for k in range(1,len(dat)):
+    if itime == int(dat[k].split(' ')[0]):
+        flnames = dat[k].split(' ')[1:];
+flnames[-1] = flnames[-1][:-1];
+
+specnum  = int(flnames[0][flnames[0].find('.out')+5:]);
+fname = '/mnt/data/dsa110/T3/corr00/' + dirname + '/' + flnames[0] + '.json';
+with open(fname) as f:
+    data = json.load(f);
+timehr   = float(data.get(list(data.keys())[0]).get('mjds'));
+snr      = float(data.get(list(data.keys())[0]).get('snr'));
+dm       = float(data.get(list(data.keys())[0]).get('dm'));
+nBeamNum = int(data.get(list(data.keys())[0]).get('ibeam'));
 
 nAnts = 24;     # antennas
 nPols = 2;
@@ -121,11 +128,14 @@ nFiles = 16;
 fnames = [];
 fcalib = [];
 for k in range(nFiles):
-    if k == 3:
-        fnames.append('/home/user/data/T3/corr21/' + dirname + '/'+sys.argv[8+k]);
+    # if k == 3:
+        # fnames.append('/home/user/data/T3/corr21/' + dirname + '/'+sys.argv[8+k]);
+        # fcalib.append(calfile.replace('XX',str(k+1).zfill(2)));
+    if k == 0:
+        fnames.append('/home/user/data/T3/corr00/' + dirname + '/'+flnames[k]);
         fcalib.append(calfile.replace('XX',str(k+1).zfill(2)));
     else:
-        fnames.append('/home/user/data/T3/corr' + str(k+1).zfill(2) + '/' + dirname + '/'+sys.argv[8+k]);
+        fnames.append('/home/user/data/T3/corr' + str(k+1).zfill(2) + '/' + dirname + '/'+flnames[k]);
         fcalib.append(calfile.replace('XX',str(k+1).zfill(2)));
 
 # measure size of the files, verify all files have the same size, estimate size of beamformed
@@ -181,7 +191,7 @@ for keyword in fhead.keys():
     
 header_string += to_sigproc_keyword(b'HEADER_END')
 
-outfile = open('/home/user/data/findpulse/' + dirname + '_' + str(specnum) + '_beam' + str(nBeamNum).zfill(3) + '.fil', 'wb');
+outfile = open('/home/user/data/findpulse/' + dirname + '_' + str(specnum) + '_' + str(itime) + '_beam' + str(nBeamNum).zfill(3) + '.fil', 'wb');
 outfile.write(header_string);
 
 alldata = [];
@@ -197,20 +207,4 @@ np.reshape(np.concatenate(np.asarray(alldata),axis=0),(-1),order='F').astype('ui
 outfile.close();
 os.system('rm /home/user/data/findpulse/*_corr*' + '_beam' + str(nBeamNum).zfill(3) + '.fil');
 
-print('file spliced.')
-
-# open file, plot spectrum  + time series
-
-# nWin = 256;
-
-# fname = '/home/user/T3_detect/processedcands/' + str(specnum) + '.fil';
-# f = FilReader(fname);
-# ts = f.dedisperse(dm);
-# fts = ts.applyBoxcar(nWin);
-
-# plt.figure()
-# plt.plot(4*8.192e-6*np.arange(len(fts)),fts);
-# plt.grid();
-# plt.xlabel('time [s]');
-# plt.ylabel('power [arbitrary]');
-# plt.show();
+print('file spliced.');
