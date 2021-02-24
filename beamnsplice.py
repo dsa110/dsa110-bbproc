@@ -1,6 +1,6 @@
 # beamform and splices files together
 # example:
-# python beamnsplice.py 08feb21 /mnt/data/dsa110/T3/calibs/beamformer_weights_corrXX_06feb21.dat 264386032 4.813138888888889 9.45282 422.555 126 fl_2.out fl_2.out fl_2.out fl_2.out fl_2.out fl_2.out fl_2.out fl_2.out fl_2.out fl_2.out fl_2.out fl_2.out fl_2.out fl_2.out fl_2.out fl_2.out &
+# python beamnsplice.py 08feb21 /mnt/data/dsa110/T3/calibs/beamformer_weights_corrXX_06feb21.dat 1748669
 
 import os
 import sys
