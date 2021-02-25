@@ -1,6 +1,6 @@
 # plot beamformed + dedispersed data
-# sinfle FIL file
-# 2/24/21
+# comparison 5 beams (labeling issue)
+# 2/10/21
 # ghellbourg@astro.caltech.edu
 
 import os
@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import json
 import subprocess
 from sigpyproc.Readers import FilReader
+import slack
 
 
 fname = sys.argv[1];
@@ -43,4 +44,8 @@ plt.grid();
 plt.xlabel('time [s]');
 plt.ylabel('power [arb.]');
 plt.title(dirname + ' - specnum = ' + str(specnum) + ' - dedispersion = ' + str(dm) + ' - boxcarwin : ' + str(nWin));
-plt.show();
+plt.savefig(fname.replace('.fil','.png'));
+
+client = slack.WebClient(token='xoxb-508911196752-1791739181778-i0912FjZnPYtLJnKIlyKSeHN');
+client.files_upload(channels='candidates',file=fname.replace('.fil','.png'),initial_comment=fname.replace('.fil','.png'))
+#plt.show();
