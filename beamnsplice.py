@@ -30,6 +30,9 @@ fil.close();
 for k in range(1,len(dat)):
     if itime == int(dat[k].split(' ')[0]):
         flnames = dat[k].split(' ')[1:];
+if 'flnames' not in locals():
+    print('did not find itime '+str(itime));
+    sys.exit();
 flnames[-1] = flnames[-1][:-1];
 
 specnum  = int(flnames[0][flnames[0].find('.out')+5:]);
@@ -127,6 +130,7 @@ nFiles = 16;
 
 fnames = [];
 fcalib = [];
+
 for k in range(nFiles):
     # if k == 3:
         # fnames.append('/home/user/data/T3/corr21/' + dirname + '/'+sys.argv[8+k]);
@@ -137,6 +141,16 @@ for k in range(nFiles):
     else:
         fnames.append('/home/user/data/T3/corr' + str(k+1).zfill(2) + '/' + dirname + '/'+flnames[k]);
         fcalib.append(calfile.replace('XX',str(k+1).zfill(2)));
+
+fileexist = 0;
+for fn in fnames:
+    if not os.path.isfile(fn):
+        print(fn);
+        fileexist += 1;
+if fileexist != 0:
+    print('... have not been found. Exiting.');
+    sys.exit();
+
 
 # measure size of the files, verify all files have the same size, estimate size of beamformed
 FilSiz = np.zeros((nFiles));
@@ -176,7 +190,7 @@ fhead = {b'telescope_id': b'66',    # DSA?
   b'foff': str(-0.03051757812).encode(),
   b'nbeams': str(nBeamNum).encode(),
   b'fch1': str(freqs[0]).encode(),
-  b'tstart': str(55000).encode(),
+  b'tstart': str(timehr).encode(),
   b'refdm': str(dm).encode(),
   b'nifs': b'1'}
 
