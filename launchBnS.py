@@ -9,13 +9,17 @@ import glob
 
 dirname = sys.argv[1];
 
+if len(glob.glob('/mnt/data/dsa110/T3/corr00/'+dirname)) == 0:
+    print('directory '+dirname+' does not exist');
+    exit();
+
 ## lists all specnums that have already been processed
 listfiles = glob.glob('/mnt/data/dsa110/findpulse/*.fil');
 allspecnum = [];
 for fname in listfiles:
     fi = fname.find('_');
     se = fname[fi+1:].find('_');
-    if fname[:fi] == dirname:
+    if dirname in fname[:fi]:
         allspecnum.append(int(fname[fi+1:fi+1+se]));
 
 ## lists triggers from T2 (not all of them have voltage dumps associated with them)
