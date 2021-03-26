@@ -6,15 +6,21 @@ import os
 import os.path
 import sys
 
+import scipy.signal
+from scipy import stats
 
 import numpy as np
-import matplotlib.pyplot as plt 
+import matplotlib.pyplot as plt
 import json
 import glob
+import optparse
 
 #import filterbank
 from sigpyproc.Readers import FilReader
 import slack
+
+# Keras neural network model for Freq/Time array
+MLMODELPATH='/home/user/connor/software/machine_learning/20190501freq_time.hdf5'
 
 plt.rcParams.update({
                     'font.size': 12,
@@ -40,7 +46,7 @@ def read_fil_data_dsa(fn, start=0, stop=1):
     """
     fil_obj = FilReader(fn)
     header = fil_obj.header
-    delta_t = fil_obj.header['tsamp'] # delta_t in seconds                                                                                                                  
+    delta_t = fil_obj.header['tsamp'] # delta_t in seconds
     fch1 = header['fch1']
     nchans = header['nchans']
     foff = header['foff']
@@ -54,38 +60,43 @@ def read_fil_data_dsa(fn, start=0, stop=1):
 
     return data, freq, delta_t, header
 
-def plotfour(dataft, datats, datadmt, 
+def plotfour(dataft, datats, datadmt,
              multibeam=None, figname_out=None, dm=0,
-             dms=[0,1], 
+             dms=[0,1],
              datadm0=None, suptitle='', heimsnr=-1,
-             ibox=1, ibeam=-1, prob=-1):
-    """ Plot a trigger's dynamics spectrum, 
-        dm/time array, pulse profile, 
+             ibox=1, ibeam=-1, prob=-1, showplot=True):
+    """ Plot a trigger's dynamics spectrum,
+        dm/time array, pulse profile,
         multibeam info (optional), and zerodm (optional)
 
         Parameter
         ---------
-        dataft : 
+        dataft :
             freq/time array (nfreq, ntime)
-        datats : 
+        datats :
             dedispersed timestream
-        datadmt : 
+        datadmt :
             dm/time array (ndm, ntime)
-        multibeam : 
+        multibeam :
             TBD
-        figname_out : 
-            save figure with this file name 
-        dm : 
-            dispersion measure of trigger 
-        dms : 
-            min and max dm for dm/time array 
-        datadm0 : 
+        figname_out :
+            save figure with this file name
+        dm :
+            dispersion measure of trigger
+        dms :
+            min and max dm for dm/time array
+        datadm0 :
             raw data timestream without dedispersion
     """
+
     datats /= np.std(datats[datats!=np.max(datats)])
+#    mm = np.argmax(datats)
+#    dataft = dataft[:, mm-32:mm+32]
+#    datats = datats[mm-32:mm+32]
+#    datadmt = datadmt[:, mm-32:mm+32]
     nfreq, ntime = dataft.shape
     dm_min, dm_max = dms[0], dms[1]
-    tmin, tmax = 1e3*dataft.header['tsamp'], 1e3*dataft.header['tsamp']*ntime
+    tmin, tmax = 0, 1e3*dataft.header['tsamp']*ntime
 #    freqmin, freqmax = min(freq), max(freq)
     freqmax = dataft.header['fch1']
     freqmin = freqmax + dataft.header['nchans']*dataft.header['foff']
@@ -93,14 +104,17 @@ def plotfour(dataft, datats, datadmt,
     fig = plt.figure(figsize=(8,10))
 
     plt.subplot(321)
-    extentft=[tmin,tmax,freqmax,freqmin]
-    plt.imshow(dataft, aspect='auto',extent=extentft)
+    extentft=[tmin,tmax,freqmin,freqmax]
+    plt.imshow(dataft, aspect='auto',extent=extentft, interpolation='nearest')
+    plt.xlim(0,1000)
     plt.xlabel('Time (ms)')
     plt.ylabel('Freq (MHz)')
-
+    if prob!=-1:
+        plt.text(tmin+50,0.5*(freqmax+freqmin),"Prob=%0.2f" % prob, color='white', fontweight='bold')
     plt.subplot(322)
-    extentdm=[tmin, tmax, dm_min, dm_max]
+    extentdm=[tmin, tmax, dm_max, dm_min]
     plt.imshow(datadmt, aspect='auto',extent=extentdm)
+    plt.xlim(0,1000)
     plt.xlabel('Time (ms)')
     plt.ylabel(r'DM (pc cm$^{-3}$)')
 
@@ -109,9 +123,10 @@ def plotfour(dataft, datats, datadmt,
     plt.grid('on', alpha=0.25)
     plt.xlabel('Time (ms)')
     plt.ylabel(r'Power ($\sigma$)')
-    plt.text(0.6*(tmin+tmax), 0.5*(max(datats)+np.median(datats)), 
+    plt.xlim(0,1000)
+    plt.text(0.6*(tmin+1000.), 0.5*(max(datats)+np.median(datats)),
             'Heimdall S/N : %0.1f\nHeimdall DM : \
-            %d\nHeimdall ibox : %d\nibeam : %d\nprob : %0.2f' % (heimsnr,dm,ibox,ibeam,prob), 
+            %d\nHeimdall ibox : %d\nibeam : %d' % (heimsnr,dm,ibox,ibeam),
             fontsize=8, verticalalignment='center')
     plt.subplot(324)
     plt.xticks([])
@@ -125,24 +140,30 @@ def plotfour(dataft, datats, datadmt,
         # plt.savefig(figname_out)
 
     if datadm0 is not None:
-        # tobs = datadm0.header['tobs']
         # tsdm0 = datadm0.mean(0)
-        plt.subplot(313)
+        plt.subplot(325)
 #        plt.plot(np.linspace(0, tobs, len(tsdm0)), tsdm0, color='k')
-        plt.plot(np.linspace(0, tmax, len(datadm0)), datadm0, color='k')
+        plt.plot(np.linspace(0, tmax, len(datadm0[0])), datadm0.mean(0), color='k')
         plt.legend(['DM=0 Timestream'], loc=2)
         plt.xlabel('Time (ms)')
 
+        plt.subplot(326)
+        plt.plot(np.linspace(freqmax,freqmin,datadm0.shape[0]), np.mean(datadm0,axis=-1), color='k')
+        plt.semilogy()
+        plt.legend(['spectrum'], loc=2)
+        plt.xlabel('freq [MHz]')
+
     plt.suptitle(suptitle, c='C1')
     plt.tight_layout()
-    #plt.show()
+    if showplot:
+        plt.show()
     if figname_out is not None:
         plt.savefig(figname_out)
 
 def dm_transform(data, dm_max=20,
-                 dm_min=0, dm0=None, ndm=64, 
+                 dm_min=0, dm0=None, ndm=64,
                  freq_ref=None, downsample=16):
-    """ Transform freq/time data to dm/time data.                                                                                                                                           
+    """ Transform freq/time data to dm/time data.
     """
     ntime = data.shape[1]
 
@@ -156,66 +177,81 @@ def dm_transform(data, dm_max=20,
 
     for ii, dm in enumerate(dms):
         dd = data.dedisperse(dm)
-#        print(dd.dm)
         _dts = np.mean(dd,axis=0)
         data_full[ii] = _dts[:ntime//downsample*downsample].reshape(ntime//downsample, downsample).mean(1)
 
     return data_full, dms
 
-def proc_cand_fil(fnfil, dm, ibox, snrheim=-1, 
+def proc_cand_fil(fnfil, dm, ibox, snrheim=-1,
                   pre_rebin=8, nfreq_plot=64,
-                  heim_raw_tres=32, 
+                  heim_raw_tres=32,
                   rficlean=False, ndm=64):
-    """ Take filterbank file path, preprocess, and 
+    """ Take filterbank file path, preprocess, and
     plot trigger
 
     Parameters:
     ----------
 
-    fnfil   : str 
-        path to .fil file 
-    DM      : float 
-        dispersion measure of trigger 
-    ibox    : int 
-        preferred boxcar width 
-    snrheim : float 
+    fnfil   : str
+        path to .fil file
+    DM      : float
+        dispersion measure of trigger
+    ibox    : int
+        preferred boxcar width
+    snrheim : float
         S/N of candidate found by Heimdall
-    pre_rebin : int 
+    pre_rebin : int
         rebin in time by this factor *before* dedispersion (saves time)
-    nfreq_plot : int 
+    nfreq_plot : int
         number of frequency channels in output
-    heim_raw_tres : 32  
+    heim_raw_tres : 32
     """
-    data, freq, delta_t_raw, header = read_fil_data_dsa(fnfil, start=0, 
-                                                       stop=int(150000))
+    header = read_fil_data_dsa(fnfil, 0, 1)[-1]
+    # read in 4 seconds of data
+    nsamp = int(4.0/header['tsamp'])
+    data, freq, delta_t_raw, header = read_fil_data_dsa(fnfil, start=0,
+                                                       stop=nsamp)
     nfreq0, ntime0 = data.shape
 
-    # Rebin in frequency by 4x
-    data = data.reshape(nfreq0//4, 4, ntime0).mean(1)
-    data.header['foff'] = data.header['foff']*4
+    # Ensure that you do not pre-downsample by more than the total boxcar
+    pre_rebin = min(pre_rebin, ibox*heim_raw_tres)
+
+    # Rebin in frequency by 8x
+    data = data.reshape(nfreq0//8, 8, ntime0).mean(1)   #bin 8 channels
+    data.header['foff'] = data.header['foff']*8         #bin 8 channels
+    data.header['nchans'] = data.header['nchans']/8
     data = data.downsample(pre_rebin)
+
+    datadm0 = data.copy()
 
     if rficlean:
 #        print("Cleaning data perchannel")
-        data = cleandata(data, clean_type='perchannel')
+        data = cleandata(data, clean_type='aladsa')
 
     tsdm0 = np.mean(data,axis=0)
-#    data = data.dedisperse(dm)
 
     datadm, dms = dm_transform(data, dm_max=dm+250,
-                               dm_min=dm-250, dm0=dm, ndm=ndm, 
-                               freq_ref=None, 
-                               downsample=heim_raw_tres*ibox)#//pre_rebin)
+                               dm_min=dm-250, dm0=dm, ndm=ndm,
+                               freq_ref=None,
+                               downsample=heim_raw_tres*ibox//pre_rebin)
     data = data.dedisperse(dm)
-    data = data.downsample(heim_raw_tres*ibox)#//pre_rebin)
-    data = data.reshape(nfreq_plot, data.shape[0]//nfreq_plot, 
+    data = data.downsample(heim_raw_tres*ibox//pre_rebin)
+    data = data.reshape(nfreq_plot, data.shape[0]//nfreq_plot,
                         data.shape[1]).mean(1)
 
     data = data-np.median(data,axis=1,keepdims=True)
     data /= np.std(data)
 
-    return data, datadm, tsdm0, dms
+    print(datadm0.dm, data.dm)
 
+    return data, datadm, tsdm0, dms, datadm0
+
+
+def medflagdata(spec, filtsize, thres):
+    specfilt = scipy.signal.medfilt(spec,kernel_size=int(filtsize));
+    speccorrec = spec - specfilt;
+    specstd = stats.median_absolute_deviation(speccorrec);
+    return np.concatenate((np.argwhere(speccorrec > thres*specstd),np.argwhere(speccorrec < -thres*specstd)))
 
 def cleandata(data, threshold_time=3.25, threshold_frequency=2.75, bin_size=32,
               n_iter_time=3, n_iter_frequency=3, clean_type='time', wideclean=None):
@@ -242,10 +278,11 @@ def cleandata(data, threshold_time=3.25, threshold_frequency=2.75, bin_size=32,
     -------
     cleaned filterbank object
     """
-    if clean_type not in ['time', 'both', 'frequency', 'perchannel']:
+    if clean_type not in ['time', 'both', 'frequency', 'perchannel', 'aladsa']:
         return data
-        
+
     nfreq = data.shape[0]
+    ntimes = data.shape[1]
 
     dtmean = np.mean(data, axis=-1)
     # Clean in time
@@ -260,6 +297,15 @@ def cleandata(data, threshold_time=3.25, threshold_frequency=2.75, bin_size=32,
             maskf = np.where(np.abs(dfmean - medf) > threshold_time*stdevf)[0]
             # replace with mean spectrum
             data[:, maskf] = dtmean[:, None]*np.ones(len(maskf))[None]
+
+    if clean_type=='aladsa':
+        print('flagging a la DSA\n');
+        meanidx = medflagdata(dtmean, 21, 5.);
+        varidx = medflagdata(np.var(data,axis=-1), 21, 5.);
+        allidx = np.concatenate((meanidx,varidx));
+        allidx = np.asarray(list(set(list(np.ravel(allidx)))));
+        data[allidx,:] = np.zeros((len(allidx),ntimes));
+
 
     if clean_type=='perchannel':
         for ii in range(n_iter_time):
@@ -285,30 +331,90 @@ def cleandata(data, threshold_time=3.25, threshold_frequency=2.75, bin_size=32,
 
 def plot_fil(fn, dm, ibox, multibeam=None, figname_out=None,
              ndm=32, suptitle='', heimsnr=-1,
-             ibeam=-1, rficlean=True, nfreq_plot=64, 
-             classify=False):
+             ibeam=-1, rficlean=True, nfreq_plot=32,
+             classify=False, heim_raw_tres=32, showplot=True):
 
-    dataft, datadm, tsdm0, dms = proc_cand_fil(fn, dm, ibox, snrheim=-1, 
-                  pre_rebin=8, nfreq_plot=nfreq_plot, ndm=ndm, rficlean=rficlean,
-                  heim_raw_tres=32)
+    dataft, datadm, tsdm0, dms, datadm0 = proc_cand_fil(fn, dm, ibox, snrheim=-1,
+                                               pre_rebin=8, nfreq_plot=nfreq_plot,
+                                               ndm=ndm, rficlean=rficlean,
+                                               heim_raw_tres=heim_raw_tres)
 
     if classify:
-        pass
+        from keras.models import load_model
+        fnmodel=MLMODELPATH
+        model = load_model(fnmodel)
+        mm = np.argmax(dataft.mean(0))
+        tlow, thigh = mm-32, mm+32
+        if mm<32:
+            tlow=0
+            thigh=64
+        if thigh>dataft.shape[1]:
+            thigh=dataft.shape[1]
+            tlow=thigh-64
+        dataml = dataft[:,tlow:thigh]
+        dataml -= np.median(dataml, axis=1, keepdims=True)
+        dataml /= np.std(dataml, axis=-1)[:, None]
+        dataml[dataml!=dataml] = 0.0
+        dataml = dataml[None,..., None]
+        prob = model.predict(dataml)[0,1]
     else:
         prob = -1
 
-    plotfour(dataft, dataft.mean(0), datadm, datadm0=tsdm0, 
+    plotfour(dataft, dataft.mean(0), datadm, datadm0=datadm0,
              multibeam=None, figname_out=figname_out, dm=dm,
-             dms=[dms[0],dms[-1]], 
+             dms=[dms[0],dms[-1]],
              suptitle=suptitle, heimsnr=heimsnr,
-             ibox=ibox, ibeam=ibeam, prob=prob)
+             ibox=ibox, ibeam=ibeam, prob=prob, showplot=showplot)
 
 
 if __name__=='__main__':
 
-    fname = sys.argv[1];
-    dirname = fname[:fname.find('_')];
-    specnum  = int(fname[fname[fname.find('_')+1:].find('_'):][:fname[fname[fname.find('_')+1:].find('_'):].find('_')])
+    parser = optparse.OptionParser(prog="filplotter",
+                                   version="",
+                                   usage="%prog fname [OPTIONS]",
+                                   description="Visualize and classify filterbank data")
+
+    parser.add_option('-s', '--slack', dest='slack', action="store_true",help="send figure to slack")
+    parser.add_option('-d', '--dm', dest='dm',
+                      help="DM ", default=None)
+    parser.add_option('-c', '--classify', dest='classify', action="store_true",
+                      help="classify using ML")
+    parser.add_option('-r', '--rficlean', dest='rficlean', action="store_true",
+                      help="excise RFI from data")
+    parser.add_option('-w', '--ibox', dest='ibox', type=int,
+                      help="ibox found by Heimdall", default=1)
+    parser.add_option('--ndm', dest='ndm', type=int, default=32,
+                      help="number of DMs for DM/time plot")
+    parser.add_option('--ntime_plot', dest='ntime_plot', type=int, default=64,
+                      help="number of samples to plot")
+    parser.add_option('--nfreq_plot', dest='nfreq_plot', type=int, default=32,
+                      help="number of freq channels to plot")
+
+    options, args = parser.parse_args()
+    fname = args[0]
+
+    if options.slack:
+        showplot=False
+    else:
+        showplot=True
+
+    if options.dm is not None:
+        dm = float(options.dm)
+        ibox = int(options.ibox)
+        plot_fil(fname, dm, ibox, multibeam=None, figname_out=None,
+                 ndm=options.ndm, suptitle='', heimsnr=-1,
+                 ibeam=1, rficlean=options.rficlean, nfreq_plot=options.nfreq_plot,
+                 classify=options.classify, heim_raw_tres=1, showplot=showplot)
+        exit()
+
+    fi = fname.find('_');
+    se = fname[fi+1:].find('_');
+    dirname = fname[:fi];
+    specnum  = int(fname[fi+1:fi+se+1])
+    print('dirname = '+dirname+' -- specnum = '+str(specnum));
+
+#    dirname = fname[:fname.find('_')];
+#    specnum  = int(fname[fname[fname.find('_')+1:].find('_'):][:fname[fname[fname.find('_')+1:].find('_'):].find('_')])
 
     jsonfile = glob.glob('/mnt/data/dsa110/T3/corr00/' + dirname + '/*'+str(specnum)+'.json')[0]
 
@@ -323,12 +429,16 @@ if __name__=='__main__':
     nWin = ibox*32;
 
     suptitle = dirname + ' - specnum = ' + str(specnum) \
-              + ' - dedispersion = ' + str(dm) + ' - boxcarwin : ' + str(nWin);
+              + ' - DM = ' + str(dm) + ' - boxcar : ' + str(nWin);
 
     fnameout = fname.replace('.fil','.png');
     plot_fil(fname, dm, ibox, multibeam=None, figname_out=fnameout,
-                 ndm=32, suptitle=suptitle, heimsnr=snr,
-                 ibeam=nBeamNum, rficlean=True, nfreq_plot=64, 
-                 classify=False);
-    client = slack.WebClient(token='****************');
-    client.files_upload(channels='candidates',file=fnameout,initial_comment=fnameout);
+             ndm=options.ndm, suptitle=suptitle, heimsnr=snr,
+             ibeam=nBeamNum, rficlean=options.rficlean,
+             nfreq_plot=options.nfreq_plot,
+             classify=options.classify, showplot=showplot);
+
+    if options.slack:
+        print("Sending to slack")
+        client = slack.WebClient(token='XXXXXXXXXXXXX');
+        client.files_upload(channels='candidates',file=fnameout,initial_comment=fnameout);
