@@ -10,6 +10,8 @@ import scipy.signal
 from scipy import stats
 
 import numpy as np
+import matplotlib as mpl
+mpl.use('Agg')
 import matplotlib.pyplot as plt
 import json
 import glob
@@ -21,6 +23,7 @@ import slack
 
 # Keras neural network model for Freq/Time array
 MLMODELPATH='/home/user/connor/software/machine_learning/20190501freq_time.hdf5'
+BASEDIR='/mnt/data/dsa110/'
 
 plt.rcParams.update({
                     'font.size': 12,
@@ -52,7 +55,6 @@ def read_fil_data_dsa(fn, start=0, stop=1):
     foff = header['foff']
     fch_f = fch1 + nchans*foff
     freq = np.linspace(fch1,fch_f,nchans)
-
     try:
         data = fil_obj.readBlock(start, stop)
     except(ValueError):
@@ -61,7 +63,7 @@ def read_fil_data_dsa(fn, start=0, stop=1):
     return data, freq, delta_t, header
 
 def plotfour(dataft, datats, datadmt,
-             multibeam=None, figname_out=None, dm=0,
+             beam_time_arr=None, figname_out=None, dm=0,
              dms=[0,1],
              datadm0=None, suptitle='', heimsnr=-1,
              ibox=1, ibeam=-1, prob=-1, showplot=True):
@@ -77,8 +79,8 @@ def plotfour(dataft, datats, datadmt,
             dedispersed timestream
         datadmt :
             dm/time array (ndm, ntime)
-        multibeam :
-            TBD
+        beam_time_arr :
+            beam time SNR array (nbeam, ntime)
         figname_out :
             save figure with this file name
         dm :
@@ -90,14 +92,9 @@ def plotfour(dataft, datats, datadmt,
     """
 
     datats /= np.std(datats[datats!=np.max(datats)])
-#    mm = np.argmax(datats)
-#    dataft = dataft[:, mm-32:mm+32]
-#    datats = datats[mm-32:mm+32]
-#    datadmt = datadmt[:, mm-32:mm+32]
     nfreq, ntime = dataft.shape
     dm_min, dm_max = dms[0], dms[1]
     tmin, tmax = 0, 1e3*dataft.header['tsamp']*ntime
-#    freqmin, freqmax = min(freq), max(freq)
     freqmax = dataft.header['fch1']
     freqmin = freqmax + dataft.header['nchans']*dataft.header['foff']
     tarr = np.linspace(tmin, tmax, ntime)
@@ -124,17 +121,28 @@ def plotfour(dataft, datats, datadmt,
     plt.xlabel('Time (ms)')
     plt.ylabel(r'Power ($\sigma$)')
     plt.xlim(0,1000)
-    plt.text(0.6*(tmin+1000.), 0.5*(max(datats)+np.median(datats)),
-            'Heimdall S/N : %0.1f\nHeimdall DM : \
-            %d\nHeimdall ibox : %d\nibeam : %d' % (heimsnr,dm,ibox,ibeam),
+    plt.text(0.55*(tmin+1000.), 0.5*(max(datats)+np.median(datats)),
+            'Heimdall S/N : %0.1f\nHeimdall DM : %d\
+            \nHeimdall ibox : %d\nibeam : %d' % (heimsnr,dm,ibox,ibeam),
             fontsize=8, verticalalignment='center')
     plt.subplot(324)
-    plt.xticks([])
-    plt.yticks([])
 
-    if multibeam is None:
+
+    if beam_time_arr is None:
+        plt.xticks([])
+        plt.yticks([])
         plt.text(0.20, 0.55, 'Multibeam info\nunder construction',
                 fontweight='bold')
+    else:
+        plt.imshow(beam_time_arr, aspect='auto', extent=[tmin, tmax, beam_time_arr.shape[0], 0],
+                  interpolation='nearest')
+        plt.axvline(540, ymin=0, ymax=6, color='r', linestyle='--', alpha=0.55)
+        plt.axvline(460, ymin=0, ymax=6, color='r', linestyle='--', alpha=0.55)
+        plt.axhline(max(0,ibeam-1), xmin=0, xmax=100, color='r', linestyle='--', alpha=0.55)
+        plt.axhline(ibeam+1, xmin=0, xmax=100, color='r', linestyle='--', alpha=0.55)
+        plt.xlim(0, 1000)
+        plt.xlabel('Time (ms)')
+        plt.ylabel('Beam', fontsize=15)
 
     # if figname_out is not None:
         # plt.savefig(figname_out)
@@ -144,7 +152,7 @@ def plotfour(dataft, datats, datadmt,
         plt.subplot(325)
 #        plt.plot(np.linspace(0, tobs, len(tsdm0)), tsdm0, color='k')
         plt.plot(np.linspace(0, tmax, len(datadm0[0])), datadm0.mean(0), color='k')
-        plt.legend(['DM=0 Timestream'], loc=2)
+        plt.legend(['DM=0 Timestream'], loc=2, fontsize=10)
         plt.xlabel('Time (ms)')
 
         plt.subplot(326)
@@ -155,10 +163,11 @@ def plotfour(dataft, datats, datadmt,
 
     plt.suptitle(suptitle, c='C1')
     plt.tight_layout()
-    if showplot:
-        plt.show()
     if figname_out is not None:
         plt.savefig(figname_out)
+    if showplot:
+        plt.show()
+
 
 def dm_transform(data, dm_max=20,
                  dm_min=0, dm0=None, ndm=64,
@@ -183,8 +192,8 @@ def dm_transform(data, dm_max=20,
     return data_full, dms
 
 def proc_cand_fil(fnfil, dm, ibox, snrheim=-1,
-                  pre_rebin=8, nfreq_plot=64,
-                  heim_raw_tres=32,
+                  pre_rebin=1, nfreq_plot=64,
+                  heim_raw_tres=1,
                   rficlean=False, ndm=64):
     """ Take filterbank file path, preprocess, and
     plot trigger
@@ -242,8 +251,6 @@ def proc_cand_fil(fnfil, dm, ibox, snrheim=-1,
     data = data-np.median(data,axis=1,keepdims=True)
     data /= np.std(data)
 
-    print(datadm0.dm, data.dm)
-
     return data, datadm, tsdm0, dms, datadm0
 
 
@@ -257,6 +264,7 @@ def cleandata(data, threshold_time=3.25, threshold_frequency=2.75, bin_size=32,
               n_iter_time=3, n_iter_frequency=3, clean_type='time', wideclean=None):
     """ Take filterbank object and mask
     RFI time samples with average spectrum.
+
     Parameters:
     ----------
     data :
@@ -274,6 +282,7 @@ def cleandata(data, threshold_time=3.25, threshold_frequency=2.75, bin_size=32,
     clean_type : str
         type of cleaning to be done.
         Accepted values: 'time', 'frequency', 'both', 'perchannel'
+
     Returns:
     -------
     cleaned filterbank object
@@ -329,13 +338,89 @@ def cleandata(data, threshold_time=3.25, threshold_frequency=2.75, bin_size=32,
 
     return data
 
+def generate_beam_time_arr(fl, ibeam=0, pre_rebin=1,
+                           dm=0, ibox=1, heim_raw_tres=1):
+    """ Take list of nbeam .fil files, dedisperse each
+    to the dm of the main trigger, and generate an
+    (nbeam, ntime) SNR array.
+
+    Parameters:
+    -----------
+    fl : list
+        list of .fil files, each 4 seconds long
+    ibeam : int
+        beam number of trigger
+    pre_rebin :
+        downsample by this factor before dedispersion to save time
+    dm : int
+        dm of ibeam candidate
+    ibox : int
+        boxcar width of ibeam candidate
+    heim_raw_tres : int
+        ratio of
+
+    Returns:
+    --------
+    beam_time_arr : ndarray
+        array of SNR values (nbeam, ntime)
+    """
+    fl.sort()
+    nbeam = len(fl)
+    header = read_fil_data_dsa(fl[0], 0, 1)[-1]
+    # read in 4 seconds of data
+    nsamp = int(4.0/header['tsamp'])
+    nsamp_final = nsamp // (heim_raw_tres*ibox)
+
+    beam_time_arr = np.zeros([nbeam, nsamp_final])
+
+    for fnfil in fl:
+        print(fnfil, beam_time_arr.shape)
+        beamno = int(fnfil.strip('.fil').split('_')[-1])
+        data, freq, delta_t_raw, header = read_fil_data_dsa(fnfil, start=0,
+                                                           stop=nsamp)
+        nfreq0, ntime0 = data.shape
+
+        # Ensure that you do not pre-downsample by more than the total boxcar
+        pre_rebin = min(pre_rebin, ibox*heim_raw_tres)
+
+        # Rebin in frequency by 8x
+        data = data.reshape(nfreq0//8, 8, ntime0).mean(1)   #bin 8 channels
+        data.header['foff'] = data.header['foff']*8         #bin 8 channels
+        data.header['nchans'] = data.header['nchans']/8
+        data = data.downsample(pre_rebin)
+        data = data.dedisperse(dm)
+        data = data.downsample(heim_raw_tres*ibox//pre_rebin)
+        datats = np.mean(data, axis=0)
+
+        # Normalize data excluding outliers
+        datatscopy = datats.copy()
+        datatscopy.sort()
+        medts = np.median(datatscopy[:int(0.975*len(datatscopy))])
+        sigts = np.std(datatscopy[:int(0.975*len(datatscopy))])
+        datats -= medts
+        datats /= sigts
+
+        beam_time_arr[beamno, :] = datats
+
+    return beam_time_arr
+
+
 def plot_fil(fn, dm, ibox, multibeam=None, figname_out=None,
              ndm=32, suptitle='', heimsnr=-1,
              ibeam=-1, rficlean=True, nfreq_plot=32,
-             classify=False, heim_raw_tres=32, showplot=True):
+             classify=False, heim_raw_tres=1, showplot=True):
+    """ Vizualize FRB candidates on DSA-110
+    """
+    if type(multibeam)==list:
+        beam_time_arr = generate_beam_time_arr(multibeam, ibeam=ibeam, pre_rebin=1,
+                                             dm=dm, ibox=ibox,
+                                             heim_raw_tres=heim_raw_tres)
+    else:
+        beam_time_arr = None
+
 
     dataft, datadm, tsdm0, dms, datadm0 = proc_cand_fil(fn, dm, ibox, snrheim=-1,
-                                               pre_rebin=8, nfreq_plot=nfreq_plot,
+                                               pre_rebin=1, nfreq_plot=nfreq_plot,
                                                ndm=ndm, rficlean=rficlean,
                                                heim_raw_tres=heim_raw_tres)
 
@@ -361,10 +446,22 @@ def plot_fil(fn, dm, ibox, multibeam=None, figname_out=None,
         prob = -1
 
     plotfour(dataft, dataft.mean(0), datadm, datadm0=datadm0,
-             multibeam=None, figname_out=figname_out, dm=dm,
+             beam_time_arr=beam_time_arr, figname_out=figname_out, dm=dm,
              dms=[dms[0],dms[-1]],
              suptitle=suptitle, heimsnr=heimsnr,
              ibox=ibox, ibeam=ibeam, prob=prob, showplot=showplot)
+
+def read_json(jsonfile):
+    with open(jsonfile) as f:
+        triggerdata = json.load(f)
+
+    timehr   = float(triggerdata.get(list(triggerdata.keys())[0]).get('mjds'))
+    snr      = float(triggerdata.get(list(triggerdata.keys())[0]).get('snr'))
+    dm       = float(triggerdata.get(list(triggerdata.keys())[0]).get('dm'))
+    ibeam = int(triggerdata.get(list(triggerdata.keys())[0]).get('ibeam'))
+    ibox     = int(triggerdata.get(list(triggerdata.keys())[0]).get('ibox'))
+
+    return timehr,snr,dm,ibeam,ibox
 
 
 if __name__=='__main__':
@@ -391,7 +488,21 @@ if __name__=='__main__':
                       help="number of freq channels to plot")
 
     options, args = parser.parse_args()
-    fname = args[0]
+    datestr = args[0]
+    specnum = args[1]
+
+    flist = glob.glob(BASEDIR+'/T1/corr*/'+datestr+'/fil_%s/*.fil' % specnum)
+    jsonfile = glob.glob(BASEDIR+'/T3/corr01/'+datestr+'/*%s*.json' % specnum)[0]
+
+    timehr,snr,dm,ibeam,ibox = read_json(jsonfile)
+    print('Read JSON file')
+
+    beamindlist=[]
+    for fnfil in flist:
+        beamno = int(fnfil.strip('.fil').split('_')[-1])
+        beamindlist.append(beamno)
+        if beamno==ibeam:
+            fname = fnfil
 
     if options.slack:
         showplot=False
@@ -407,38 +518,30 @@ if __name__=='__main__':
                  classify=options.classify, heim_raw_tres=1, showplot=showplot)
         exit()
 
-    fi = fname.find('_');
-    se = fname[fi+1:].find('_');
-    dirname = fname[:fi];
-    specnum  = int(fname[fi+1:fi+se+1])
-    print('dirname = '+dirname+' -- specnum = '+str(specnum));
+    # fi = fname.find('_');
+    # se = fname[fi+1:].find('_');
+    # dirname = fname[:fi];
+    # specnum  = int(fname[fi+1:fi+se+1])
+    # print('dirname = '+dirname+' -- specnum = '+str(specnum));
 
 #    dirname = fname[:fname.find('_')];
 #    specnum  = int(fname[fname[fname.find('_')+1:].find('_'):][:fname[fname[fname.find('_')+1:].find('_'):].find('_')])
 
-    jsonfile = glob.glob('/mnt/data/dsa110/T3/corr00/' + dirname + '/*'+str(specnum)+'.json')[0]
+    # For now this will be a placeholder.
+#    jsonfile = glob.glob('/mnt/data/dsa110/T3/corr00/' + dirname + '/*'+str(specnum)+'.json')[0]
 
-    with open(jsonfile) as f:
-        triggerdata = json.load(f)
+    suptitle = 'specnum:%s  dm:%0.4f  boxcar:%d  ibeam:%d' % (specnum, dm, int(ibox), int(ibeam))
 
-    timehr   = float(triggerdata.get(list(triggerdata.keys())[0]).get('mjds'))
-    snr      = float(triggerdata.get(list(triggerdata.keys())[0]).get('snr'))
-    dm       = float(triggerdata.get(list(triggerdata.keys())[0]).get('dm'))
-    nBeamNum = int(triggerdata.get(list(triggerdata.keys())[0]).get('ibeam'))
-    ibox     = int(triggerdata.get(list(triggerdata.keys())[0]).get('ibox'))
-    nWin = ibox*32;
+    fnameout = fname.replace('.fil','.png')
 
-    suptitle = dirname + ' - specnum = ' + str(specnum) \
-              + ' - DM = ' + str(dm) + ' - boxcar : ' + str(nWin);
-
-    fnameout = fname.replace('.fil','.png');
-    plot_fil(fname, dm, ibox, multibeam=None, figname_out=fnameout,
+    plot_fil(fname, dm, ibox, figname_out=fnameout,
              ndm=options.ndm, suptitle=suptitle, heimsnr=snr,
-             ibeam=nBeamNum, rficlean=options.rficlean,
+             ibeam=ibeam, rficlean=options.rficlean,
              nfreq_plot=options.nfreq_plot,
-             classify=options.classify, showplot=showplot);
+             classify=options.classify, showplot=showplot,
+             multibeam=flist, heim_raw_tres=1)
 
     if options.slack:
         print("Sending to slack")
-        client = slack.WebClient(token='XXXXXXXXXXXXX');
+        client = slack.WebClient(token='XXXXXXXXXXXXXXXX');
         client.files_upload(channels='candidates',file=fnameout,initial_comment=fnameout);
