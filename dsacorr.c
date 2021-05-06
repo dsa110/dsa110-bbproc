@@ -1,12 +1,10 @@
 /*
 gcc -o dsacorr corr.c -I/usr/local/include -L/usr/local/lib -lm -g -O2 -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran
 correlates voltage data
-
 * data file name
 * output file name
 * time integration in ms
 * frequency integration in MHz
-
 */
 
 
@@ -30,6 +28,7 @@ void usage()
 	   " -o output file name[no default]\n"
 	   " -t time integration in ms [default : 0.03]\n"
 	   " -f frequency resolution in MHz [default : 0.03]\n"
+	   " -a number of antennas [default : 24]\n"
 	   " -h print usage\n");
 }
 
@@ -55,7 +54,7 @@ int main (int argc, char *argv[]) {
 	fout=(char *)malloc(sizeof(char)*100);
 	sprintf(fout,"nofile");
 	
-	while ((arg=getopt(argc,argv,"d:o:t:f:h")) != -1)
+	while ((arg=getopt(argc,argv,"d:o:t:f:a:h")) != -1)
 	{
 		switch (arg)
 		{
@@ -93,6 +92,12 @@ int main (int argc, char *argv[]) {
 			if (optarg)
 			{
 				fRes = atof(optarg);
+				break;
+			}
+			case 'a':
+			if (optarg)
+			{
+				nAnts = atoi(optarg);
 				break;
 			}
 			case 'h':
