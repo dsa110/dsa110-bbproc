@@ -1,12 +1,9 @@
 /*
 gcc -o incoh_beamformer incoh_beamformer.c -I/usr/local/include -L/usr/local/lib -lm -g -O2 -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran
-
 inoherent beamformer
-
 This code should take 5 parameters:
 * data file name
 * output file name
-
 greg hellbourg
 ghellbourg@astro.caltech.edu
 */
@@ -55,6 +52,8 @@ void usage()
 	   "t3_INCOHERENT_beamformer [options]\n"
 	   " -d voltage data file name [no default]\n"
 	   " -o output file name[no default]\n"
+	   " -a number of antennas in voltage file[default : 24]\n"
+	   " -u number of antennas used in beamformer [default : 24]\n"
 	   " -h print usage\n");
 }
 
@@ -63,6 +62,7 @@ int main (int argc, char *argv[]) {
 	
 	// data file constants
 	int nAnts = 24;
+	int nUsedAnts = 24;
 	int nChans = 384;
 	int nTimes = 2;
 	int nPols = 2;
@@ -76,7 +76,7 @@ int main (int argc, char *argv[]) {
 	fout=(char *)malloc(sizeof(char)*200);
 	sprintf(fout,"nofile");
 	
-	while ((arg=getopt(argc,argv,"d:o:h")) != -1)
+	while ((arg=getopt(argc,argv,"d:o:a:u:h")) != -1)
 	{
 		switch (arg)
 		{
@@ -104,6 +104,30 @@ int main (int argc, char *argv[]) {
 				usage();
 				return EXIT_FAILURE;
 			}
+			case 'a':
+			if (optarg)
+			{
+				nAnts = atoi(optarg);
+				break;
+			}
+			else
+			{
+				printf("-a flag requires argument");
+				usage();
+				return EXIT_FAILURE;
+			}
+			case 'u':
+			if (optarg)
+			{
+				nUsedAnts = atoi(optarg);
+				break;
+			}
+			else
+			{
+				printf("-u flag requires argument");
+				usage();
+				return EXIT_FAILURE;
+			}
 			case 'h':
 			usage();
 			return EXIT_SUCCESS;
@@ -113,7 +137,7 @@ int main (int argc, char *argv[]) {
 	
 	// compute beamformer weights
 	unsigned char * output = (char *)malloc(sizeof(char)*384*2);
-	unsigned char * input = (char *)malloc(sizeof(char)*24*384*2*2);
+	unsigned char * input = (char *)malloc(sizeof(char)*nAnts*384*2*2);
 
 	FILE *ptr;
 	FILE *write_ptr;
@@ -132,7 +156,7 @@ int main (int argc, char *argv[]) {
 		
 		rd = fread(input,nAnts*nChans*nTimes*nPols,1,ptr);
 
-		beamformer(input,nAnts,nChans,nTimes,nPols,output);
+		beamformer(input,nUsedAnts,nChans,nTimes,nPols,output);
 
 		fwrite(output,nChans*nTimes,1,write_ptr);
 		
