@@ -5,6 +5,7 @@ correlates voltage data
 * output file name
 * time integration in ms
 * frequency integration in MHz
+* number of antennas
 */
 
 
