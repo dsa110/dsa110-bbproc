@@ -1,8 +1,10 @@
 /*gcc -o beamformer beamformer.c -I/usr/local/include -L/usr/local/lib -lm -g -O2 -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran
 python beamformer was too slow, decided to use python to write up header etc but do actual beamforming in C.
-This code should take 5 parameters:
+This code should take 8 parameters:
 * data file name
 * calibration file name
+* number of antennas in voltage file
+* number of antennas to use in beamforming
 * start frequency
 * separation
 * beam number
