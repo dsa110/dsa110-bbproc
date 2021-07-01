@@ -1,4 +1,4 @@
-/*-o beamformer beamformer.c -I/usr/local/include -L/usr/local/lib -lm -g -O2 -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran
+/*gcc -o beamformer beamformer.c -I/usr/local/include -L/usr/local/lib -lm -g -O2 -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran
 python beamformer was too slow, decided to use python to write up header etc but do actual beamforming in C.
 This code should take 5 parameters:
 * data file name
@@ -38,7 +38,6 @@ int init_weights(char * fnam, float *antpos, float *weights, int nPols) {
         // weights: takes [ant, NW==48]
 
         FILE *fin;
-        FILE *fants;
         int rd;
 
         fin=fopen(fnam,"rb");
@@ -98,7 +97,7 @@ void beamformer(char *input, float *wr, float *wi, unsigned char *output, int nC
         float inr_x, ini_x, inr_y, ini_y;
         float wrx, wix, wry, wiy;
         float rx, ix, ry, iy;
-        float tmprealX, tmpimagX, tmprealY, tmpimagY;
+//        float tmprealX, tmpimagX, tmprealY, tmpimagY;
 
         for(int nTime=0;nTime<nTimes;nTime++){
                 for(int nChan=0;nChan<48;nChan++){
@@ -142,8 +141,10 @@ void usage()
   fprintf (stdout,
            "t3_beamformer [options]\n"
            " -d voltage data file name [no default]\n"
-           " -f calibration file name[no default]\n"
-           " -o output file name[no default]\n"
+           " -f calibration file name [no default]\n"
+           " -o output file name [no default]\n"
+		   " -a number of antennas in file [default 30]\n"
+		   " -u number of antennas to be used [default 24]\n"
            " -z fch1 in MHz [default 1530]\n"
            " -s interbeam separation in arcmin [default 1.4]\n"
            " -n beam number [0 -- 255, default 127]\n"
@@ -155,8 +156,7 @@ int main (int argc, char *argv[]) {
 
 
         int nChans = 384;
-        int nAnts = 24;
-        int nPols = 2;
+		int nPols = 2;
         int nTimes = 2;
 
 
@@ -165,6 +165,8 @@ int main (int argc, char *argv[]) {
         float fch1 = 1530.0;
         float sep = 1.4;
         int nBeamNum = 127;
+		int nUsedAnts = 24;
+        int nAnts = 30;
         char * fnam;
         fnam=(char *)malloc(sizeof(char)*200);
         sprintf(fnam,"nofile");
@@ -175,7 +177,7 @@ int main (int argc, char *argv[]) {
         fout=(char *)malloc(sizeof(char)*200);
         sprintf(fout,"nofile");
 
-        while ((arg=getopt(argc,argv,"d:f:o:z:s:n:h")) != -1)
+        while ((arg=getopt(argc,argv,"d:f:o:a:u:z:s:n:h")) != -1)
         {
                 switch (arg)
                 {
@@ -215,7 +217,31 @@ int main (int argc, char *argv[]) {
                                 usage();
                                 return EXIT_FAILURE;
                         }
-                        case 'z':
+						case 'a':
+                        if (optarg)
+                        {
+                                nAnts = atoi(optarg);
+                                break;
+                        }
+                        else
+                        {
+                                printf("-a flag requires argument");
+                                usage();
+                                return EXIT_FAILURE;
+                        }
+                        case 'u':
+                        if (optarg)
+                        {
+                                nUsedAnts = atoi(optarg);
+                                break;
+                        }
+                        else
+                        {
+                                printf("-u flag requires argument");
+                                usage();
+                                return EXIT_FAILURE;
+                        }
+						case 'z':
                         if (optarg)
                         {
                                 fch1 = atof(optarg);
@@ -287,7 +313,7 @@ int main (int argc, char *argv[]) {
 
                 rd = fread(input,nAnts*nChans*nTimes*nPols,1,ptr);
 
-                beamformer(input,wr,wi,output,nChans,nAnts,nTimes,nPols);
+                beamformer(input,wr,wi,output,nChans,nUsedAnts,nTimes,nPols);
 
                 fwrite(output,sizeof(unsigned char),nChans*nTimes,write_ptr);
 
