@@ -2,9 +2,7 @@
 voltage beamformer : outputs the beamformed voltage data from DSA-110 voltage buffers
 output is int32 samples
 format is nBlocks x 384 channels x 2 time samples x 2 pols x 2 r/i
-
 gcc -o beamvol beamvol.c -I/usr/local/include -L/usr/local/lib -lm -g -O2 -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran
-
 This code should take 5 parameters:
 * data file name
 * calibration file name
@@ -132,6 +130,8 @@ void usage()
 	   " -d voltage data file name [no default]\n"
 	   " -f calibration file name[no default]\n"
 	   " -o output file name[no default]\n"
+	   " -a number of antennas in voltage file [default 30]\n"
+	   " -u number of antennas to use [default 24]\n"
 	   " -z fch1 in MHz [default 1530]\n"
 	   " -s interbeam separation in arcmin [default 1.4]\n"
 	   " -n beam number [0 -- 255, default 127]\n"
@@ -143,7 +143,6 @@ int main (int argc, char *argv[]) {
 	
 	
 	int nChans = 384;
-	int nAnts = 24;
 	int nPols = 2;
 	int nTimes = 2;
 	
@@ -153,6 +152,8 @@ int main (int argc, char *argv[]) {
 	float fch1 = 1530.0;
 	float sep = 1.4;
 	int nBeamNum = 127;
+	int nAnts = 30;
+	int nAntsUsed = 24;
 	char * fnam;
 	fnam=(char *)malloc(sizeof(char)*200);
 	sprintf(fnam,"nofile");
@@ -163,7 +164,7 @@ int main (int argc, char *argv[]) {
 	fout=(char *)malloc(sizeof(char)*200);
 	sprintf(fout,"nofile");
 	
-	while ((arg=getopt(argc,argv,"d:f:o:z:s:n:h")) != -1)
+	while ((arg=getopt(argc,argv,"d:f:o:a:u:z:s:n:h")) != -1)
 	{
 		switch (arg)
 		{
@@ -200,6 +201,30 @@ int main (int argc, char *argv[]) {
 			else
 			{
 				printf("-o flag requires argument");
+				usage();
+				return EXIT_FAILURE;
+			}
+			case 'a':
+			if (optarg)
+			{
+				nAnts = atoi(optarg);
+				break;
+			}
+			else
+			{
+				printf("-a flag requires argument");
+				usage();
+				return EXIT_FAILURE;
+			}
+			case 'u':
+			if (optarg)
+			{
+				nAntsUsed = atoi(optarg);
+				break;
+			}
+			else
+			{
+				printf("-u flag requires argument");
 				usage();
 				return EXIT_FAILURE;
 			}
@@ -275,7 +300,7 @@ int main (int argc, char *argv[]) {
 		
 		rd = fread(input,nAnts*nChans*nTimes*nPols,1,ptr);
 
-		beamformer(input,wr,wi,output,nChans,nAnts,nTimes,nPols);
+		beamformer(input,wr,wi,output,nChans,nAntsUsed,nTimes,nPols);
 
 		fwrite(output,sizeof(int),nChans*nTimes*nPols*2,write_ptr);
 		
