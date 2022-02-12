@@ -1,0 +1,337 @@
+// -*- c++ -*-
+/*
+
+Strategy is to operate on a single voltage file, and produce a heap of stuff. 
+ - read in and send to GPU
+ - simple promote
+ - correlate and write out
+ - calibrate, phase and beamform (later)
+
+*/
+
+#include <iostream>
+#include <algorithm>
+using std::cout;
+using std::cerr;
+using std::endl;
+#include <stdio.h>
+#include <stdlib.h>
+#include <cmath>
+#include <string.h>
+#include <unistd.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <netinet/in.h>
+#include <time.h>
+#include <syslog.h>
+#include <pthread.h>
+
+#include <mma.h>
+#include <cuda.h>
+#include "cuda_fp16.h"
+//#include "dada_cuda.h"
+#include "dada_client.h"
+#include "dada_def.h"
+#include "dada_hdu.h"
+#include "multilog.h"
+#include "ipcio.h"
+#include "ipcbuf.h"
+#include "dada_affinity.h"
+#include "ascii_header.h"
+#include <thrust/device_ptr.h>
+#include <thrust/fill.h>
+
+#include <cuda_runtime_api.h>
+using namespace nvcuda;
+
+#define NANT 63
+#define NCHAN 384
+#define NT 30720
+#define NBASE 2016
+#define NPTR 8 // pols, small times, r/i
+
+// promoter to fp32
+// run with NANT*NCHAN*NPTR/2/32 blocks of 32 threads
+__global__ void promoter(char *input, float *output) {
+
+  int bidx = blockIdx.x; // assume 16*48*NANT
+  int tidx = threadIdx.x; // assume 32
+  int iidx = bidx*32+tidx;
+  
+  output[2*iidx] = (float)((char)(((unsigned char)(input[iidx]) & (unsigned char)(15)) << 4) >> 4); //r
+  output[2*iidx+1] = (float)((char)(((unsigned char)(input[iidx]) & (unsigned char)(240))) >> 4); //i
+
+}
+
+// correlator
+// input is two packed time ints for all antennas
+// also input antenna 1 and 2 indices for each baseline
+// output is [2x time, baseline, freq, pols, r/i]
+// run with NBASE*NCHAN/32 blocks of 32 threads
+__global__ void correlator(float *input, float *output, int *a1, int *a2, float scfac) {
+
+  int bidx = blockIdx.x; // assume 16*48*NANT                                                              
+  int tidx = threadIdx.x; // assume 32                                                                     
+  int iidx = bidx*32+tidx;
+  int basel = (int)(iidx/NCHAN); // baseline number
+  int chgidx = (int)(bidx % (NCHAN/32)); // index of 32-channel group for this block
+  int ch = (int)(iidx % NCHAN); // channel number
+  
+  // each block operates on 32 channels (one per thread)
+  __shared__ float d1[32*NPTR];
+  __shared__ float d2[32*NPTR];
+  // start indices for each antenna from input
+  int idx0_1 = a1[basel]*NCHAN*NPTR + chgidx*32*NPTR;
+  int idx0_2 = a2[basel]*NCHAN*NPTR + chgidx*32*NPTR;
+
+  // pull data into shared mem, for each antenna
+  int ii = tidx*NPTR;
+  for (int i=idx0_1+tidx*NPTR; i<idx0_1+(tidx+1)*NPTR; i++) {
+    d1[ii] = input[i];
+    ii++;
+  }
+  ii=tidx*NPTR;
+  for (int i=idx0_2+tidx*NPTR; i<idx0_2+(tidx+1)*NPTR; i++) {
+    d2[ii] = input[i];
+    ii++;
+  }
+
+  // now each thread can happily operate on a single channel
+  // order is [time, pol, R/I]
+  // make two separate arrays, each with [X*X / X*Y / Y*X / Y*Y, complexity]
+  float output_tims[2][8], a1r, a1i, a2r, a2i;
+  // loop over times
+  for (int ti=0;ti<2;ti++) {
+    // loop over pols
+    ii=0;
+    for (int p1=0;p1<2;p1++) {
+      for (int p2=0;p2<2;p2++) {
+	
+	a1r = d1[tidx*NPTR + ti*4 + p1*2];
+	a1i = d1[tidx*NPTR + ti*4 + p1*2 + 1];
+	a2r = d2[tidx*NPTR + ti*4 + p2*2];
+	a2i = d2[tidx*NPTR + ti*4 + p2*2 + 1];
+
+	output_tims[ti][2*ii] = a1r*a2r + a1i*a2i;
+	output_tims[ti][2*ii+1] = a1r*a2i - a1i*a2r;
+
+	ii++;
+	
+      }
+    }
+  }
+  
+  // write to output
+  ii = basel*NCHAN*8 + ch*8;
+  for (int i=0;i<8;i++) output[ii+i] += output_tims[0][i]*scfac;
+  ii += NBASE*NCHAN*8;
+  for (int i=0;i<8;i++) output[ii+i] += output_tims[1][i]*scfac;
+  
+}
+
+// really simple - adds the two times in correlator output
+// run with NBASE*NCHAN*8/32 blocks of 32 threads
+__global__ void adder(float *input, float *output) {
+
+  int bidx = blockIdx.x; // assume 16*48*NANT                                                              
+  int tidx = threadIdx.x; // assume 32                                                                     
+  int iidx = bidx*32+tidx;
+
+  output[iidx] = input[iidx] + input[NBASE*NCHAN*8 + iidx];
+
+}
+
+// really simple - zeros correlator output
+// run with 2*NBASE*NCHAN*8/32 blocks of 32 threads
+__global__ void zeroer(float *input) {
+
+  int bidx = blockIdx.x; // assume 16*48*NANT                                                              
+  int tidx = threadIdx.x; // assume 32                                                                     
+  int iidx = bidx*32+tidx;
+
+  input[iidx] = 0.;
+
+}
+
+
+void usage()
+{
+  fprintf (stdout,
+	   "toolkit [options]\n"
+	   " -i input filename [no default]\n"
+	   " -o output filename [default output.corr]\n"
+	   " -t number of time integrations x 32.768us [default 8]\n"
+	   " -h print usage\n");
+}
+
+
+// MAIN
+
+int main (int argc, char *argv[]) {
+
+  // use cuda device 1
+  printf("Using GPU 1\n");
+  cudaSetDevice(1);
+
+  // command line arguments
+  int arg = 0;
+  char * finnam;
+  finnam=(char *)malloc(sizeof(char)*100);
+  char * foutnam;
+  foutnam=(char *)malloc(sizeof(char)*100);
+  sprintf(foutnam,"output.corr");
+  int tint = 8;
+
+  while ((arg=getopt(argc,argv,"i:o:t:h")) != -1)
+    {
+      switch (arg)
+	{
+	case 'i':
+	  if (optarg)
+	    {
+	      strcpy(finnam,optarg);
+	      break;
+	    }
+	  else
+	    {
+	      syslog(LOG_ERR,"-i flag requires argument");
+	      usage();
+	      return EXIT_FAILURE;
+	    }
+	case 'o':
+	  if (optarg)
+	    {
+	      strcpy(foutnam,optarg);
+	      break;
+	    }
+	  else
+	    {
+	      syslog(LOG_ERR,"-o flag requires argument");
+	      usage();
+	      return EXIT_FAILURE;
+	    }
+	case 't':
+	  if (optarg)
+	    {
+	      tint = atoi(optarg);
+	      break;
+	    }
+	  else
+	    {
+	      syslog(LOG_ERR,"-t flag requires argument");
+	      usage();
+	      return EXIT_FAILURE;
+	    }
+	case 'h':
+	  usage();
+	  return EXIT_SUCCESS;
+	}
+    }
+
+  printf("Reading from %s, writing to %s\n",finnam,foutnam);
+  printf("Integrating by %d ints - check that this is power of 2\n",tint);
+
+  // allocate all memory
+
+  // CPU
+  char *indata = (char *)malloc(sizeof(char)*NANT*NCHAN*NPTR/2);
+  float *outdata = (float *)malloc(sizeof(float)*NBASE*NCHAN*8);
+  int *h_a1 = (int *)malloc(sizeof(int)*NBASE);
+  int *h_a2 = (int *)malloc(sizeof(int)*NBASE);
+  // GPU
+  char *d_indata;
+  float *d_promoted, *d_corrout, *d_finalout;
+  int *d_a1, *d_a2;
+  cudaMalloc((void **)&d_indata, NANT*NCHAN*(NPTR/2)*sizeof(char));
+  cudaMalloc((void **)&d_promoted, NANT*NCHAN*NPTR*sizeof(float));
+  cudaMalloc((void **)&d_corrout, 2*NBASE*NCHAN*8*sizeof(float));
+  cudaMalloc((void **)&d_finalout, NBASE*NCHAN*8*sizeof(float));
+  cudaMalloc((void **)&d_a1, NBASE*sizeof(int));
+  cudaMalloc((void **)&d_a2, NBASE*sizeof(int));
+
+  // set up a1 and a2
+  int ctr=0;
+  for (int i=0;i<63;i++) {
+    for (int j=i;j<63;j++) {
+      h_a1[ctr] = i;
+      h_a2[ctr] = j;
+      ctr++;
+    }
+  }
+  cudaMemcpy(d_a1,h_a1,NBASE*sizeof(int),cudaMemcpyHostToDevice);
+  cudaMemcpy(d_a2,h_a2,NBASE*sizeof(int),cudaMemcpyHostToDevice);
+
+  // open input and output files
+  FILE *fin, *fout;
+  if (!(fin=fopen(finnam,"rb"))) 
+    printf("could not open input file\n");
+  if (!(fout=fopen(foutnam,"wb"))) 
+    printf("could not open output file\n");
+
+  // loop over input
+
+  int timi=0;
+  ctr = 0;
+  for(int bigI=0;bigI<NT;bigI++) {
+
+    // read data, send to GPU, promote
+    fread(indata, sizeof(char), NANT*NCHAN*NPTR/2, fin);
+    cudaMemcpy(d_indata, indata, (NANT*NCHAN*NPTR/2)*sizeof(char), cudaMemcpyHostToDevice);
+    promoter<<<NANT*NCHAN*NPTR/2/32,32>>>(d_indata, d_promoted);
+    
+    // deal with time integration
+    if (timi==0) 
+      zeroer<<<2*NBASE*NCHAN*8/32,32>>>(d_corrout);
+
+    // correlate
+    correlator<<<NBASE*NCHAN/32,32>>>(d_promoted,d_corrout,d_a1,d_a2,(1./(1.*tint)));
+    timi+=2;
+
+    // deal with time integration
+    if (timi>=tint) {
+
+      // don't add up
+      if (tint==1) {
+	
+	cudaMemcpy(outdata, d_corrout, NBASE*NCHAN*8*sizeof(float), cudaMemcpyDeviceToHost);
+	fwrite(outdata,sizeof(float),NBASE*NCHAN*8,fout);
+	cudaMemcpy(outdata, d_corrout + NBASE*NCHAN*8, NBASE*NCHAN*8*sizeof(float), cudaMemcpyDeviceToHost);
+	fwrite(outdata,sizeof(float),NBASE*NCHAN*8,fout);
+
+      }
+
+      // add up
+      else {
+
+	adder<<<NBASE*NCHAN*8/32,32>>>(d_corrout,d_finalout);
+	cudaMemcpy(outdata, d_finalout, NBASE*NCHAN*8*sizeof(float), cudaMemcpyDeviceToHost);
+	fwrite(outdata,sizeof(float),NBASE*NCHAN*8,fout);
+	
+      }
+
+      ctr++;
+      //printf("written integration %d of %d\n",ctr,NT*2/tint);
+      timi = 0;
+    }
+      
+
+  }
+
+  fclose(fin);
+  fclose(fout);
+  
+  cudaFree(d_indata);
+  cudaFree(d_corrout);
+  cudaFree(d_finalout);
+  cudaFree(d_promoted);
+  cudaFree(d_a1);
+  cudaFree(d_a2);
+  free(indata);
+  free(outdata);
+  free(h_a1);
+  free(h_a2);
+  free(finnam);
+  free(foutnam);
+
+}

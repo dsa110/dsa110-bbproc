@@ -205,7 +205,7 @@ for keyword in fhead.keys():
     
 header_string += to_sigproc_keyword(b'HEADER_END')
 
-outfile = open('/home/user/data/findpulse/' + dirname + '_' + str(specnum) + '_' + str(itime) + '_beam' + str(nBeamNum).zfill(3) + '.fil', 'wb');
+outfile = open('/home/ubuntu/data/' + dirname + '_' + str(specnum) + '_' + str(itime) + '_beam' + str(nBeamNum).zfill(3) + '.fil', 'wb');
 outfile.write(header_string);
 
 alldata = [];
