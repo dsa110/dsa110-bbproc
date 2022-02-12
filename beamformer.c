@@ -1,8 +1,10 @@
-/*-o beamformer beamformer.c -I/usr/local/include -L/usr/local/lib -lm -g -O2 -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran
+/*gcc -o beamformer beamformer.c -I/usr/local/include -L/usr/local/lib -lm -g -O2 -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran
 python beamformer was too slow, decided to use python to write up header etc but do actual beamforming in C.
-This code should take 5 parameters:
+This code should take 8 parameters:
 * data file name
 * calibration file name
+* number of antennas in voltage file
+* number of antennas to use in beamforming
 * start frequency
 * separation
 * beam number
@@ -178,8 +180,10 @@ void usage()
   fprintf (stdout,
            "t3_beamformer [options]\n"
            " -d voltage data file name [no default]\n"
-           " -f calibration file name[no default]\n"
-           " -o output file name[no default]\n"
+           " -f calibration file name [no default]\n"
+           " -o output file name [no default]\n"
+		   " -a number of antennas in file [default 30]\n"
+		   " -u number of antennas to be used [default 24]\n"
            " -z fch1 in MHz [default 1530]\n"
            " -s interbeam separation in arcmin [default 1.4]\n"
            " -n beam number [0 -- 255, default 127]\n"
@@ -202,7 +206,7 @@ int main (int argc, char *argv[]) {
         int arg = 0;
         float fch1 = 1530.0;
         float sep = 1.0;
-        int nBeamNum = 127;
+        int nBeamNum = 127, nUsedAnts;
         char * fnam;
         fnam=(char *)malloc(sizeof(char)*200);
         char * fflag;
@@ -215,7 +219,7 @@ int main (int argc, char *argv[]) {
         fout=(char *)malloc(sizeof(char)*200);
         sprintf(fout,"nofile");
 
-        while ((arg=getopt(argc,argv,"d:f:o:z:s:n:q:hi")) != -1)
+        while ((arg=getopt(argc,argv,"d:f:o:a:u:z:s:n:q:ih")) != -1)
         {
                 switch (arg)
                 {
@@ -267,7 +271,31 @@ int main (int argc, char *argv[]) {
                                 usage();
                                 return EXIT_FAILURE;
                         }
-                        case 'z':
+						case 'a':
+                        if (optarg)
+                        {
+                                nAnts = atoi(optarg);
+                                break;
+                        }
+                        else
+                        {
+                                printf("-a flag requires argument");
+                                usage();
+                                return EXIT_FAILURE;
+                        }
+                        case 'u':
+                        if (optarg)
+                        {
+                                nUsedAnts = atoi(optarg);
+                                break;
+                        }
+                        else
+                        {
+                                printf("-u flag requires argument");
+                                usage();
+                                return EXIT_FAILURE;
+                        }
+						case 'z':
                         if (optarg)
                         {
                                 fch1 = atof(optarg);
