@@ -34,17 +34,6 @@ using std::endl;
 #include <mma.h>
 #include <cuda.h>
 #include "cuda_fp16.h"
-//#include "dada_cuda.h"
-#include "dada_client.h"
-#include "dada_def.h"
-#include "dada_hdu.h"
-#include "multilog.h"
-#include "ipcio.h"
-#include "ipcbuf.h"
-#include "dada_affinity.h"
-#include "ascii_header.h"
-#include <thrust/device_ptr.h>
-#include <thrust/fill.h>
 
 #include <cuda_runtime_api.h>
 using namespace nvcuda;
@@ -58,6 +47,38 @@ using namespace nvcuda;
 #define AV 8
 #define PI 3.141592653589793238
 #define CVAC 299792458.0
+
+
+// dedisperser
+// dms are integer shifts
+// run with NT*NANT blocks of NCHAN threads
+__global__ void dedisperser(char *input, char *output, int *dms) {
+
+  size_t bidx = blockIdx.x; 
+  size_t ch = threadIdx.x;
+  size_t iidx = bidx*NCHAN+ch;
+
+  // time sample
+  size_t tim = (size_t)(bidx / NANT);
+  // antenna
+  size_t ant = (size_t)(bidx % NANT);
+  size_t oidx;
+
+  // wrap
+  if (tim < dms[ch]) {
+    oidx = (NT-(dms[ch]-tim))*NANT*NCHAN + ant*NCHAN + ch;
+    for (size_t i=0;i<4;i++) 
+      output[4*oidx+i] = input[4*iidx+i];
+  }
+
+  // normal shift
+  if (tim >= dms[ch]) {
+    oidx = (tim-dms[ch])*NANT*NCHAN + ant*NCHAN + ch;
+    for (size_t i=0;i<4;i++) 
+      output[4*oidx+i] = input[4*iidx+i];
+  }
+ 
+}
 
 
 // promoter to fp32
@@ -106,6 +127,7 @@ __global__ void correlator(float *input, float *output, int *a1, int *a2, float 
     ii++;
   }
 
+
   // get weights for a1 and a2;
   float w_a1[4], w_a2[4];
   for (int i=0;i<4;i++) {
@@ -134,6 +156,10 @@ __global__ void correlator(float *input, float *output, int *a1, int *a2, float 
 	w2r = a2r*w_a2[2*p2] - a2i*w_a2[2*p2+1]; 
 	w1i = a1r*w_a1[2*p1+1] + a1i*w_a1[2*p1];
 	w2i = a2r*w_a2[2*p2+1] + a2i*w_a2[2*p2]; 
+	/*w1r = a1r;
+	w1i = a1i;
+	w2r = a2r;
+	w2i = a2i;*/
 	
 	output_tims[ti][2*ii] = w1r*w2r + w1i*w2i;
 	output_tims[ti][2*ii+1] = w1r*w2i - w1i*w2r;
@@ -156,7 +182,7 @@ __global__ void correlator(float *input, float *output, int *a1, int *a2, float 
 // input has shape NBASE*NCHAN*8
 // reduce to stokes I along NBASE axis using shared memory
 // run with NCHAN blocks of 512 threads - will add 2016 baselines
-__global__ void reduce_corrs(float *input, unsigned char *output, float scfac, int *a1, int *a2) {
+__global__ void reduce_corrs(float *input, float *output, float scfac, int *a1, int *a2, int stokes, float *antpos, float minBase) {
 
   int bidx = blockIdx.x; // assume NCHAN
   int tidx = threadIdx.x; // assume 512                                                                  
@@ -166,17 +192,66 @@ __global__ void reduce_corrs(float *input, unsigned char *output, float scfac, i
 
   // add into shared memory
   summer[tidx] = 0.;
-  if (tidx<504) {
-    if (a1[tidx]!=a2[tidx])
-      summer[tidx] += input[tidx*NCHAN*8 + bidx*8] + input[tidx*NCHAN*8 + bidx*8 + 6];
-    if (a1[tidx+504]!=a2[tidx+504])
-      summer[tidx] += input[(tidx+1*504)*NCHAN*8 + bidx*8] + input[(tidx+1*504)*NCHAN*8 + bidx*8 + 6];
-    if (a1[tidx+2*504]!=a2[tidx+2*504])
-      summer[tidx] += input[(tidx+2*504)*NCHAN*8 + bidx*8] + input[(tidx+2*504)*NCHAN*8 + bidx*8 + 6];
-    if (a1[tidx+3*504]!=a2[tidx+3*504])
-      summer[tidx] += input[(tidx+3*504)*NCHAN*8 + bidx*8] + input[(tidx+3*504)*NCHAN*8 + bidx*8 + 6];
+
+  // stokes I
+  if (stokes==0) {
+    if (tidx<504) {
+      if (a1[tidx]!=a2[tidx] && fabsf(antpos[a2[tidx]]-antpos[a1[tidx]])>minBase)
+	summer[tidx] += input[tidx*NCHAN*8 + bidx*8] + input[tidx*NCHAN*8 + bidx*8 + 6];
+      if (a1[tidx+504]!=a2[tidx+504] && fabsf(antpos[a2[tidx+504]]-antpos[a1[tidx+504]])>minBase)
+	summer[tidx] += input[(tidx+1*504)*NCHAN*8 + bidx*8] + input[(tidx+1*504)*NCHAN*8 + bidx*8 + 6];
+      if (a1[tidx+2*504]!=a2[tidx+2*504] && fabsf(antpos[a2[tidx+2*504]]-antpos[a1[tidx+2*504]])>minBase)
+	summer[tidx] += input[(tidx+2*504)*NCHAN*8 + bidx*8] + input[(tidx+2*504)*NCHAN*8 + bidx*8 + 6];
+      if (a1[tidx+3*504]!=a2[tidx+3*504] && fabsf(antpos[a2[tidx+3*504]]-antpos[a1[tidx+3*504]])>minBase)
+	summer[tidx] += input[(tidx+3*504)*NCHAN*8 + bidx*8] + input[(tidx+3*504)*NCHAN*8 + bidx*8 + 6];
+    }
+  }
+  // stokes Q
+  if (stokes==1) {
+    if (tidx<504) {
+      if (a1[tidx]!=a2[tidx])
+	summer[tidx] += input[tidx*NCHAN*8 + bidx*8] - input[tidx*NCHAN*8 + bidx*8 + 6];
+      if (a1[tidx+504]!=a2[tidx+504])
+	summer[tidx] += input[(tidx+1*504)*NCHAN*8 + bidx*8] - input[(tidx+1*504)*NCHAN*8 + bidx*8 + 6];
+      if (a1[tidx+2*504]!=a2[tidx+2*504])
+	summer[tidx] += input[(tidx+2*504)*NCHAN*8 + bidx*8] - input[(tidx+2*504)*NCHAN*8 + bidx*8 + 6];
+      if (a1[tidx+3*504]!=a2[tidx+3*504])
+	summer[tidx] += input[(tidx+3*504)*NCHAN*8 + bidx*8] - input[(tidx+3*504)*NCHAN*8 + bidx*8 + 6];
+    }
+  }
+  // stokes U
+  if (stokes==2) {
+    if (tidx<504) {
+      if (a1[tidx]!=a2[tidx])
+	summer[tidx] += input[tidx*NCHAN*8 + bidx*8 + 2] + input[tidx*NCHAN*8 + bidx*8 + 4];
+      if (a1[tidx+504]!=a2[tidx+504])
+	summer[tidx] += input[(tidx+1*504)*NCHAN*8 + bidx*8 + 2] + input[(tidx+1*504)*NCHAN*8 + bidx*8 + 4];
+      if (a1[tidx+2*504]!=a2[tidx+2*504])
+	summer[tidx] += input[(tidx+2*504)*NCHAN*8 + bidx*8 + 2] + input[(tidx+2*504)*NCHAN*8 + bidx*8 + 4];
+      if (a1[tidx+3*504]!=a2[tidx+3*504])
+	summer[tidx] += input[(tidx+3*504)*NCHAN*8 + bidx*8 + 2] + input[(tidx+3*504)*NCHAN*8 + bidx*8 + 4];
+    }
+  }
+  // stokes V
+  if (stokes==3) {
+    if (tidx<504) {
+      if (a1[tidx]!=a2[tidx])
+	summer[tidx] += input[tidx*NCHAN*8 + bidx*8 + 3] - input[tidx*NCHAN*8 + bidx*8 + 5];
+      if (a1[tidx+504]!=a2[tidx+504])
+	summer[tidx] += input[(tidx+1*504)*NCHAN*8 + bidx*8 + 3] - input[(tidx+1*504)*NCHAN*8 + bidx*8 + 5];
+      if (a1[tidx+2*504]!=a2[tidx+2*504])
+	summer[tidx] += input[(tidx+2*504)*NCHAN*8 + bidx*8 + 3] - input[(tidx+2*504)*NCHAN*8 + bidx*8 + 5];
+      if (a1[tidx+3*504]!=a2[tidx+3*504])
+	summer[tidx] += input[(tidx+3*504)*NCHAN*8 + bidx*8 + 3] - input[(tidx+3*504)*NCHAN*8 + bidx*8 + 5];
+    }
   }
 
+  // [X_i X_j*  X_i Y_j*  Y_i X_j* Y_i Y_j*]
+  // Stokes I: 0.5*(Re(X_i X_j*) + Re(Y_i Y_j*))
+  // Stokes Q: 0.5*(Re(X_i X_j*) - Re(Y_i Y_j*))
+  // Stokes U: 0.5*(Re(X_i Y_j*) + Re(Y_i X_j*))
+  // Stokes V: 0.5*(Im(X_i Y_j*) - Im(Y_i X_j*))
+  
   __syncthreads();
 
   // now reduce in shared memory
@@ -202,7 +277,7 @@ __global__ void reduce_corrs(float *input, unsigned char *output, float scfac, i
 
   __syncthreads();
 
-  if (tidx==0) output[bidx] = (unsigned char)(summer[0]*scfac);
+  if (tidx==0) output[bidx] = (summer[0]*scfac);
 
 }
 
@@ -218,9 +293,11 @@ __global__ void delayer(float *input, float *freqs, float *delays) {
   int basel = (int)(bci / NCHAN);
   int ch = (int)(bci % NCHAN);
 
-  float vr, vi, arg=-2.*PI*freqs[ch]*delays[basel]*1e-9;
+  float vr, vi, arg=-2.*3.14159265359*freqs[ch]*delays[basel]*1e-9;
   vr = input[2*iidx]*cosf(arg) - input[2*iidx+1]*sinf(arg);
+  __syncthreads();
   vi = input[2*iidx]*sinf(arg) + input[2*iidx+1]*cosf(arg);
+  __syncthreads();
 
   input[2*iidx] = vr;
   input[2*iidx+1] = vi;
@@ -278,9 +355,9 @@ __global__ void zeroer(float *input) {
 
 
 // CPU functions
-int init_weights(char *wnam, float *antpos, float *weights, char *flagnam, int weight, int doflag);
+int init_weights(char *wnam, float *antpos, float *weights, char *flagnam, int weight, int doflag, int donorm);
 // loads in weights
-int init_weights(char * wnam, float *antpos, float *weights, char *flagnam, int weight, int doflag) {
+int init_weights(char * wnam, float *antpos, float *weights, char *flagnam, int weight, int doflag, int donorm) {
 
   // assumes 64 antennas
   // antpos: takes only easting
@@ -301,7 +378,7 @@ int init_weights(char * wnam, float *antpos, float *weights, char *flagnam, int 
 
     for (int i=0;i<64*48*2;i++) {
       wnorm = sqrt(weights[2*i]*weights[2*i] + weights[2*i+1]*weights[2*i+1]);
-      if (wnorm!=0.0) {
+      if (wnorm!=0.0 && donorm==1) {
 	weights[2*i] /= wnorm*wnorm;
 	weights[2*i+1] /= wnorm*wnorm;
       }
@@ -314,6 +391,10 @@ int init_weights(char * wnam, float *antpos, float *weights, char *flagnam, int 
     for (int i=0;i<64*48*2;i++) {
       weights[2*i] = 1.;
       weights[2*i+1] = 0.;
+    }
+
+    for (int i=0;i<64;i++) {
+      antpos[i] = 0.;
     }
 
   }
@@ -337,8 +418,8 @@ int init_weights(char * wnam, float *antpos, float *weights, char *flagnam, int 
     
   }
 
-  for (int i=0;i<63;i++) 
-    printf("%f\n",antpos[i]);
+  //for (int i=0;i<63;i++) 
+  //  printf("%f\n",antpos[i]);
   
   printf("Loaded antenna positions and weights\n");
   return 0;
@@ -349,11 +430,11 @@ void calc_voltage_weights(float *antpos, float *weights, float *freqs, float *bf
 void calc_voltage_weights(float *antpos, float *weights, float *freqs, float *bfweights, int nBeamNum) {
 
   float theta, afac, twr, twi;
-  theta = sep*(127.-(float)nBeamNum)*PI/10800.; // radians
+  theta = sep*(127.-(float)nBeamNum)*3.14159265358/10800.; // radians
   for(int nAnt=0;nAnt<64;nAnt++){
     for(int nChan=0;nChan<48;nChan++){
       for(int nPol=0;nPol<2;nPol++){
-	afac = -2.*PI*freqs[nChan*8+4]*theta/CVAC; // factor for rotate
+	afac = -2.*3.14159265358*freqs[nChan*8+4]*theta/CVAC; // factor for rotate
 	twr = cos(afac*antpos[nAnt]);
 	twi = sin(afac*antpos[nAnt]);
 
@@ -392,6 +473,13 @@ void usage()
 	   " -p coherent philterbank writing file [no default - will not write if none given]\n"
 	   " -d file with NBASE delays to remove from baselines [optional - no default]\n"
 	   " -a average visibilities by 8x in frequency\n"
+	   " -m dedisperse [optional - no default]\n"
+	   " -u unify all antennas (testing only)\n"
+	   " -s output number of packets to be processed. 1 packet = 2 samples [default NT==30720]\n"
+	   " -q offset from start in number of packets [default 0]\n"
+	   " -g Stokes parameter to output to filterbank, from 0[I], 1[Q], 2[U], 3[V] [default 0]\n"
+	   " -v minimum baseline length (E-W, in m) for input to beamformer [default 0]\n"
+	   " -n do NOT normalize bf weights\n"
 	   " -h print usage\n");
 }
 
@@ -426,8 +514,16 @@ int main (int argc, char *argv[]) {
   delnam = (char *)malloc(sizeof(char)*100);
   int delaying = 0;
   int averaging = 0;
+  int dedispersing = 0;
+  float dm = 0.;
+  int OUTNT=NT;
+  int OFFT=0;
+  int unify=0;
+  int stokes=0;
+  float minBase=-1.;
+  int donorm = 1;
 
-  while ((arg=getopt(argc,argv,"i:o:t:w:f:c:b:p:d:ah")) != -1)
+  while ((arg=getopt(argc,argv,"i:o:t:w:f:c:b:p:d:m:s:q:g:v:nuah")) != -1)
     {
       switch (arg)
 	{
@@ -482,6 +578,30 @@ int main (int argc, char *argv[]) {
 	      usage();
 	      return EXIT_FAILURE;
 	    }
+	case 'v':
+	  if (optarg)
+	    {
+	      minBase=atof(optarg);
+	      break;
+	    }
+	  else
+	    {
+	      syslog(LOG_ERR,"-v flag requires argument");
+	      usage();
+	      return EXIT_FAILURE;
+	    }
+	case 'g':
+	  if (optarg)
+	    {
+	      stokes=atoi(optarg);
+	      break;
+	    }
+	  else
+	    {
+	      syslog(LOG_ERR,"-g flag requires argument");
+	      usage();
+	      return EXIT_FAILURE;
+	    }
 	case 'w':
 	  if (optarg)
 	    {
@@ -492,6 +612,43 @@ int main (int argc, char *argv[]) {
 	  else
 	    {
 	      syslog(LOG_ERR,"-w flag requires argument");
+	      usage();
+	      return EXIT_FAILURE;
+	    }
+	case 's':
+	  if (optarg)
+	    {
+	      OUTNT = atoi(optarg);
+	      break;
+	    }
+	  else
+	    {
+	      syslog(LOG_ERR,"-s flag requires argument");
+	      usage();
+	      return EXIT_FAILURE;
+	    }
+	case 'm':
+	  if (optarg)
+	    {
+	      dm = atof(optarg);
+	      dedispersing=1;
+	      break;
+	    }
+	  else
+	    {
+	      syslog(LOG_ERR,"-m flag requires argument");
+	      usage();
+	      return EXIT_FAILURE;
+	    }
+	case 'q':
+	  if (optarg)
+	    {
+	      OFFT = atoi(optarg);
+	      break;
+	    }
+	  else
+	    {
+	      syslog(LOG_ERR,"-q flag requires argument");
 	      usage();
 	      return EXIT_FAILURE;
 	    }
@@ -544,8 +701,14 @@ int main (int argc, char *argv[]) {
 	      usage();
 	      return EXIT_FAILURE;
 	    }
-	case 'a':
+ 	case 'a':
 	  averaging=1;
+	  break;
+ 	case 'n':
+	  donorm=0;
+	  break;
+ 	case 'u':
+	  unify=1;
 	  break;
 	case 'h':
 	  usage();
@@ -555,7 +718,15 @@ int main (int argc, char *argv[]) {
 
   if (writing) printf("Reading from %s, writing to %s\n",finnam,foutnam);
   else printf("Reading from %s, no visibilities written\n",finnam);
-  if (philwriting) printf("Will write coherent filterbank to %s\n",filnam);
+  if (philwriting) {
+    printf("Will write coherent filterbank to %s\n",filnam);
+    if (stokes<0 || stokes>3) {
+      printf("Cannot form Stokes parameter %d\n",stokes);
+      return EXIT_FAILURE;
+    }
+    printf("Using Stokes parameter %d\n",stokes);
+    printf("Minimum baseline (m): %g\n",minBase);
+  }
   printf("Integrating by %d ints - check that this is power of 2\n",tint);
   printf("Assuming fch1 %f MHz\n",fch1);
   if (weight) printf("Will weight voltages using %s\n",wnam);
@@ -565,21 +736,74 @@ int main (int argc, char *argv[]) {
     printf("Not rotating voltages with beamn %d\n",beamn);
   if (averaging) printf("Will average visibilities by 8x in frequency\n");
   if (delaying) printf("Will apply baseline delays from %s\n",delnam);
+  if (dedispersing) printf("Will dedisperse to DM %f, adding delay to 1530MHz\n",dm);
+  if (!donorm) printf("Will not normalize bf weights\n");
 
+  // open input and output files
+  FILE *fin, *fout, *flout;
+  if (!(fin=fopen(finnam,"rb"))) 
+    printf("could not open input file\n");
+  if (writing) {
+    if (!(fout=fopen(foutnam,"wb"))) 
+      printf("could not open output file\n");
+  }
+  if (philwriting) {
+    if (!(flout=fopen(filnam,"wb"))) 
+      printf("could not open filterbank output file\n");
+  }
+  
+  // read into memory and deal with dedispersion
+  printf("initial memory allocation - please stay patient...\n");
+  size_t asize = 2972712960;//NT*NANT*NCHAN*NPTR/((size_t)(2));
+  size_t cpsize;
+  char *indata = (char *)malloc(sizeof(char)*asize);
+  char *d_alldata1, *d_alldata2;
+  if (dedispersing)
+    cudaMalloc((void **)&d_alldata1, asize*sizeof(char));
+  cudaMalloc((void **)&d_alldata2, asize*sizeof(char));
+  int *h_dms = (int *)malloc(sizeof(int)*NCHAN);
+  int *d_dms;
+  float myf;
+  cudaMalloc((void **)&d_dms, sizeof(int)*NCHAN);
+  if (dedispersing) {
+    for (int i=0;i<NCHAN;i++) {
+      myf = (fch1 - i*250./8192.)*1e-3;
+      h_dms[i] = (int)(round(4.15*dm*(pow(myf,-2.)-pow(1.53,-2.))/(0.065536)));
+      //printf("DM delays %f (MHz) %d (samples)\n",myf*1e3,h_dms[i]);
+    }
+    cudaMemcpy(d_dms, h_dms, NCHAN*sizeof(int), cudaMemcpyHostToDevice);
+  }
+  printf("Reading from file...\n");
+  fread(indata, sizeof(char), asize, fin);  
+  printf("Reading onto GPU...\n");
+  if (!dedispersing)
+    cudaMemcpy(d_alldata2, indata, asize*sizeof(char), cudaMemcpyHostToDevice);
+  else {
+    cudaMemcpy(d_alldata1, indata, asize*sizeof(char), cudaMemcpyHostToDevice);
+    cudaDeviceSynchronize();
+    printf("Dedispersing...\n");
+    dedisperser<<<NT*NANT,NCHAN>>>(d_alldata1, d_alldata2, d_dms);
+  }
+
+  cudaDeviceSynchronize();
+  free(h_dms);
+  free(indata);
+  if (dedispersing)
+    cudaFree(d_alldata1);
+  cudaFree(d_dms);
   
   // allocate all memory
 
   // CPU
-  char *indata = (char *)malloc(sizeof(char)*NANT*NCHAN*NPTR/2);
   float *outdata = (float *)malloc(sizeof(float)*NBASE*NCHAN*8);
-  unsigned char *filout = (unsigned char *)malloc(sizeof(unsigned char)*NCHAN);
+  float *filout = (float *)malloc(sizeof(float)*NCHAN);
   int *h_a1 = (int *)malloc(sizeof(int)*NBASE);
   int *h_a2 = (int *)malloc(sizeof(int)*NBASE);
   // GPU
   char *d_indata;
   float *d_promoted, *d_corrout, *d_finalout, *d_avout;
   int *d_a1, *d_a2;
-  unsigned char *d_filout;
+  float *d_filout;
   cudaMalloc((void **)&d_indata, NANT*NCHAN*(NPTR/2)*sizeof(char));
   cudaMalloc((void **)&d_promoted, NANT*NCHAN*NPTR*sizeof(float));
   cudaMalloc((void **)&d_corrout, 2*NBASE*NCHAN*8*sizeof(float));
@@ -587,7 +811,7 @@ int main (int argc, char *argv[]) {
   cudaMalloc((void **)&d_avout, NBASE*(NCHAN/AV)*4*sizeof(float));
   cudaMalloc((void **)&d_a1, NBASE*sizeof(int));
   cudaMalloc((void **)&d_a2, NBASE*sizeof(int));
-  cudaMalloc((void **)&d_filout, NCHAN*sizeof(unsigned char));
+  cudaMalloc((void **)&d_filout, NCHAN*sizeof(float));
 
   // load in delays
   float * h_delays = (float *)malloc(sizeof(float)*NBASE);
@@ -614,11 +838,14 @@ int main (int argc, char *argv[]) {
   cudaMalloc((void **)&d_freqs, NCHAN*sizeof(float));
   for (int i=0;i<NCHAN;i++) freqs[i] = (fch1 - i*250./8192.)*1e6;
   cudaMemcpy(d_freqs,freqs,NCHAN*sizeof(float),cudaMemcpyHostToDevice);
-  init_weights(wnam,antpos,weights,flagnam,weight,doflag);
+  init_weights(wnam,antpos,weights,flagnam,weight,doflag,donorm);
   if (beamn>=0 && beamn<=255)
     calc_voltage_weights(antpos,weights,freqs,bfweights,beamn);
   float *d_weights;
   cudaMalloc((void **)&d_weights, 64*48*2*2*sizeof(float));
+  float *d_antpos;
+  cudaMalloc((void **)&d_antpos, 64*sizeof(float));
+  cudaMemcpy(d_antpos,antpos,64*sizeof(float),cudaMemcpyHostToDevice);
   if (beamn>=0 && beamn<=255)
     cudaMemcpy(d_weights,bfweights,64*48*2*2*sizeof(float),cudaMemcpyHostToDevice);
   else
@@ -636,36 +863,29 @@ int main (int argc, char *argv[]) {
   cudaMemcpy(d_a1,h_a1,NBASE*sizeof(int),cudaMemcpyHostToDevice);
   cudaMemcpy(d_a2,h_a2,NBASE*sizeof(int),cudaMemcpyHostToDevice);
 
-  // open input and output files
-  FILE *fin, *fout, *flout;
-  if (!(fin=fopen(finnam,"rb"))) 
-    printf("could not open input file\n");
-  if (writing) {
-    if (!(fout=fopen(foutnam,"wb"))) 
-      printf("could not open output file\n");
-  }
-  if (philwriting) {
-    if (!(flout=fopen(filnam,"wb"))) 
-      printf("could not open filterbank output file\n");
-  }
-
   // loop over input
 
-  printf("starting loop stay patient... :-)\n");
+  printf("starting loop\n");
   
   int timi=0;
   ctr = 0;
-  for(int bigI=0;bigI<NT;bigI++) {
+  for (int bigI=OFFT;bigI<OUTNT+OFFT;bigI++) {
 
     // read data, send to GPU, promote
-    fread(indata, sizeof(char), NANT*NCHAN*NPTR/2, fin);
-    cudaMemcpy(d_indata, indata, (NANT*NCHAN*NPTR/2)*sizeof(char), cudaMemcpyHostToDevice);
-    promoter<<<NANT*NCHAN*NPTR/2/32,32>>>(d_indata, d_promoted);
+    cpsize = bigI*NANT*NCHAN*NPTR/2;
+    cudaMemcpy(d_indata, d_alldata2 + cpsize, (NANT*NCHAN*NPTR/2)*sizeof(char), cudaMemcpyDeviceToDevice);
+    promoter<<<NANT*NCHAN*NPTR/2/32,32>>>(d_indata, d_promoted);    
+    //promoter<<<NANT*NCHAN*NPTR/2/32,32>>>(d_alldata2 + cpsize, d_promoted);
+    if (unify) {
+      for (int i=1;i<NANT;i++)
+	cudaMemcpy(d_promoted + i*NCHAN*NPTR, d_promoted, NCHAN*NPTR*sizeof(float), cudaMemcpyDeviceToDevice);
+    }
     
     // deal with time integration
-    if (timi==0) 
+    if (timi==0) {
       zeroer<<<2*NBASE*NCHAN*8/32,32>>>(d_corrout);
-
+      zeroer<<<NBASE*NCHAN*8/32,32>>>(d_finalout);
+    }
     // correlate
     correlator<<<NBASE*NCHAN/32,32>>>(d_promoted,d_corrout,d_a1,d_a2,(1./(1.*tint)),d_weights);
     timi+=2;
@@ -690,9 +910,9 @@ int main (int argc, char *argv[]) {
 	  }
 	}
 	if (philwriting) {
-	  reduce_corrs<<<NCHAN,512>>>(d_corrout, d_filout, 0.25, d_a1, d_a2);
-	  cudaMemcpy(filout, d_filout, NCHAN*sizeof(unsigned char), cudaMemcpyDeviceToHost);
-	  fwrite(filout,sizeof(unsigned char),NCHAN,flout);
+	  reduce_corrs<<<NCHAN,512>>>(d_corrout, d_filout, 0.25, d_a1, d_a2, stokes, d_antpos, minBase);
+	  cudaMemcpy(filout, d_filout, NCHAN*sizeof(float), cudaMemcpyDeviceToHost);
+	  fwrite(filout,sizeof(float),NCHAN,flout);
 	}
 		
 	if (writing) {
@@ -709,9 +929,9 @@ int main (int argc, char *argv[]) {
 	  }
 	}
 	if (philwriting) {
-	  reduce_corrs<<<NCHAN,512>>>(d_corrout + NBASE*NCHAN*8, d_filout, 0.25, d_a1, d_a2);
-	  cudaMemcpy(filout, d_filout, NCHAN*sizeof(unsigned char), cudaMemcpyDeviceToHost);
-	  fwrite(filout,sizeof(unsigned char),NCHAN,flout);
+	  reduce_corrs<<<NCHAN,512>>>(d_corrout + NBASE*NCHAN*8, d_filout, 0.25, d_a1, d_a2, stokes, d_antpos, minBase);
+	  cudaMemcpy(filout, d_filout, NCHAN*sizeof(float), cudaMemcpyDeviceToHost);
+	  fwrite(filout,sizeof(float),NCHAN,flout);
 	}
 	
       }
@@ -734,9 +954,9 @@ int main (int argc, char *argv[]) {
 	  }
 	}
 	if (philwriting) {
-	  reduce_corrs<<<NCHAN,512>>>(d_finalout, d_filout, 0.125, d_a1, d_a2);
-	  cudaMemcpy(filout, d_filout, NCHAN*sizeof(unsigned char), cudaMemcpyDeviceToHost);	  
-	  fwrite(filout,sizeof(unsigned char),NCHAN,flout);
+	  reduce_corrs<<<NCHAN,512>>>(d_finalout, d_filout, 4., d_a1, d_a2, stokes, d_antpos, minBase);
+	  cudaMemcpy(filout, d_filout, NCHAN*sizeof(float), cudaMemcpyDeviceToHost);	  
+	  fwrite(filout,sizeof(float),NCHAN,flout);
 	}
 
       }
@@ -752,7 +972,8 @@ int main (int argc, char *argv[]) {
   fclose(fin);
   if (writing) fclose(fout);
   if (philwriting) fclose(flout);
-  
+
+  cudaFree(d_alldata2);
   cudaFree(d_indata);
   cudaFree(d_corrout);
   cudaFree(d_finalout);
@@ -764,13 +985,13 @@ int main (int argc, char *argv[]) {
   cudaFree(d_avout);
   cudaFree(d_delays);
   cudaFree(d_freqs);
+  cudaFree(d_antpos);
   free(filout);
   free(antpos);
   free(weights);
   free(freqs);
   free(wnam);
-  free(flagnam);
-  free(indata);
+  free(flagnam);  
   free(outdata);
   free(h_a1);
   free(h_a2);

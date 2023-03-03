@@ -365,7 +365,7 @@ int main (int argc, char *argv[]) {
         rewind(ptr);
 	//fseek(ptr, 369169920L, SEEK_SET);
         //int nTotSam = (int)(floor(sz / (nAnts*nChans*nTimes*nPols)));
-	int nTotSam = 16384;
+	int nTotSam = 32768;
 	
         int rd;
         for(int nSam = 0; nSam < nTotSam; nSam++) {
