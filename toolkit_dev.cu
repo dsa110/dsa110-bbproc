@@ -38,10 +38,10 @@ using std::endl;
 #include <cuda_runtime_api.h>
 using namespace nvcuda;
 
-#define NANT 63
+#define NANT 96
 #define NCHAN 384
 #define NT 30720
-#define NBASE 2016
+#define NBASE 4656
 #define NPTR 8 // pols, small times, r/i
 #define sep 1.0 // arcmin
 #define AV 8
@@ -181,68 +181,52 @@ __global__ void correlator(float *input, float *output, int *a1, int *a2, float 
 
 // input has shape NBASE*NCHAN*8
 // reduce to stokes I along NBASE axis using shared memory
-// run with NCHAN blocks of 512 threads - will add 2016 baselines
+// run with NCHAN blocks of 1024 threads - will add 4656 baselines
 __global__ void reduce_corrs(float *input, float *output, float scfac, int *a1, int *a2, int stokes, float *antpos, float minBase) {
 
   int bidx = blockIdx.x; // assume NCHAN
-  int tidx = threadIdx.x; // assume 512                                                                  
-  int iidx = bidx*512+tidx;
+  int tidx = threadIdx.x; // assume 608                                                                  
+  int iidx = bidx*1024+tidx;
 
-  volatile __shared__ float summer[512];
+  volatile __shared__ float summer[1024];
 
   // add into shared memory
   summer[tidx] = 0.;
 
   // stokes I
   if (stokes==0) {
-    if (tidx<504) {
-      if (a1[tidx]!=a2[tidx] && fabsf(antpos[a2[tidx]]-antpos[a1[tidx]])>minBase)
-	summer[tidx] += input[tidx*NCHAN*8 + bidx*8] + input[tidx*NCHAN*8 + bidx*8 + 6];
-      if (a1[tidx+504]!=a2[tidx+504] && fabsf(antpos[a2[tidx+504]]-antpos[a1[tidx+504]])>minBase)
-	summer[tidx] += input[(tidx+1*504)*NCHAN*8 + bidx*8] + input[(tidx+1*504)*NCHAN*8 + bidx*8 + 6];
-      if (a1[tidx+2*504]!=a2[tidx+2*504] && fabsf(antpos[a2[tidx+2*504]]-antpos[a1[tidx+2*504]])>minBase)
-	summer[tidx] += input[(tidx+2*504)*NCHAN*8 + bidx*8] + input[(tidx+2*504)*NCHAN*8 + bidx*8 + 6];
-      if (a1[tidx+3*504]!=a2[tidx+3*504] && fabsf(antpos[a2[tidx+3*504]]-antpos[a1[tidx+3*504]])>minBase)
-	summer[tidx] += input[(tidx+3*504)*NCHAN*8 + bidx*8] + input[(tidx+3*504)*NCHAN*8 + bidx*8 + 6];
+    if (tidx<582) {
+      for (int iFac=0;iFac<8;iFac++) {
+	if (a1[tidx+iFac*582]!=a2[tidx+iFac*582] && fabsf(antpos[a2[tidx+iFac*582]]-antpos[a1[tidx+iFac*582]])>minBase)
+	  summer[tidx] += input[(tidx+iFac*582)*NCHAN*8 + bidx*8] + input[(tidx+iFac*582)*NCHAN*8 + bidx*8 + 6];
+      }
     }
   }
   // stokes Q
   if (stokes==1) {
-    if (tidx<504) {
-      if (a1[tidx]!=a2[tidx])
-	summer[tidx] += input[tidx*NCHAN*8 + bidx*8] - input[tidx*NCHAN*8 + bidx*8 + 6];
-      if (a1[tidx+504]!=a2[tidx+504])
-	summer[tidx] += input[(tidx+1*504)*NCHAN*8 + bidx*8] - input[(tidx+1*504)*NCHAN*8 + bidx*8 + 6];
-      if (a1[tidx+2*504]!=a2[tidx+2*504])
-	summer[tidx] += input[(tidx+2*504)*NCHAN*8 + bidx*8] - input[(tidx+2*504)*NCHAN*8 + bidx*8 + 6];
-      if (a1[tidx+3*504]!=a2[tidx+3*504])
-	summer[tidx] += input[(tidx+3*504)*NCHAN*8 + bidx*8] - input[(tidx+3*504)*NCHAN*8 + bidx*8 + 6];
+    if (tidx<582) {
+      for (int iFac=0;iFac<8;iFac++) {
+	if (a1[tidx+iFac*582]!=a2[tidx+iFac*582])
+	  summer[tidx] += input[(tidx+iFac*582)*NCHAN*8 + bidx*8] - input[(tidx+iFac*582)*NCHAN*8 + bidx*8 + 6];
+      }
     }
   }
   // stokes U
   if (stokes==2) {
-    if (tidx<504) {
-      if (a1[tidx]!=a2[tidx])
-	summer[tidx] += input[tidx*NCHAN*8 + bidx*8 + 2] + input[tidx*NCHAN*8 + bidx*8 + 4];
-      if (a1[tidx+504]!=a2[tidx+504])
-	summer[tidx] += input[(tidx+1*504)*NCHAN*8 + bidx*8 + 2] + input[(tidx+1*504)*NCHAN*8 + bidx*8 + 4];
-      if (a1[tidx+2*504]!=a2[tidx+2*504])
-	summer[tidx] += input[(tidx+2*504)*NCHAN*8 + bidx*8 + 2] + input[(tidx+2*504)*NCHAN*8 + bidx*8 + 4];
-      if (a1[tidx+3*504]!=a2[tidx+3*504])
-	summer[tidx] += input[(tidx+3*504)*NCHAN*8 + bidx*8 + 2] + input[(tidx+3*504)*NCHAN*8 + bidx*8 + 4];
+    if (tidx<582) {
+      for (int iFac=0;iFac<8;iFac++) {
+	if (a1[tidx+iFac*582]!=a2[tidx+iFac*582])
+	  summer[tidx] += input[(tidx+iFac*582)*NCHAN*8 + bidx*8 + 2] + input[(tidx+iFac*582)*NCHAN*8 + bidx*8 + 4];
+      }
     }
   }
   // stokes V
   if (stokes==3) {
-    if (tidx<504) {
-      if (a1[tidx]!=a2[tidx])
-	summer[tidx] += input[tidx*NCHAN*8 + bidx*8 + 3] - input[tidx*NCHAN*8 + bidx*8 + 5];
-      if (a1[tidx+504]!=a2[tidx+504])
-	summer[tidx] += input[(tidx+1*504)*NCHAN*8 + bidx*8 + 3] - input[(tidx+1*504)*NCHAN*8 + bidx*8 + 5];
-      if (a1[tidx+2*504]!=a2[tidx+2*504])
-	summer[tidx] += input[(tidx+2*504)*NCHAN*8 + bidx*8 + 3] - input[(tidx+2*504)*NCHAN*8 + bidx*8 + 5];
-      if (a1[tidx+3*504]!=a2[tidx+3*504])
-	summer[tidx] += input[(tidx+3*504)*NCHAN*8 + bidx*8 + 3] - input[(tidx+3*504)*NCHAN*8 + bidx*8 + 5];
+    if (tidx<582) {
+      for (int iFac=0;iFac<8;iFac++) {
+	if (a1[tidx+iFac*582]!=a2[tidx+iFac*582])
+	  summer[tidx] += input[(tidx+iFac*582)*NCHAN*8 + bidx*8 + 3] - input[(tidx+iFac*582)*NCHAN*8 + bidx*8 + 5];
+      }
     }
   }
 
@@ -255,7 +239,9 @@ __global__ void reduce_corrs(float *input, float *output, float scfac, int *a1, 
   __syncthreads();
 
   // now reduce in shared memory
-  if (tidx<256) {
+  if (tidx<512) {
+    summer[tidx] += summer[tidx+512];
+    __syncthreads();
     summer[tidx] += summer[tidx+256];
     __syncthreads();
     summer[tidx] += summer[tidx+128];
@@ -277,7 +263,7 @@ __global__ void reduce_corrs(float *input, float *output, float scfac, int *a1, 
 
   __syncthreads();
 
-  if (tidx==0) output[bidx] = (summer[0]*scfac);
+  if (tidx==0) output[bidx] = summer[0]*scfac;
 
 }
 
@@ -355,11 +341,11 @@ __global__ void zeroer(float *input) {
 
 
 // CPU functions
-int init_weights(char *wnam, float *antpos, float *weights, char *flagnam, int weight, int doflag, int donorm);
+int init_weights(char *wnam, float *antpos, float *weights, char *flagnam, int weight, int doflag);
 // loads in weights
-int init_weights(char * wnam, float *antpos, float *weights, char *flagnam, int weight, int doflag, int donorm) {
+int init_weights(char * wnam, float *antpos, float *weights, char *flagnam, int weight, int doflag) {
 
-  // assumes 64 antennas
+  // assumes 96 antennas
   // antpos: takes only easting
   // weights: takes [ant, NW==48] 
 
@@ -373,12 +359,12 @@ int init_weights(char * wnam, float *antpos, float *weights, char *flagnam, int 
       return 1;
     }
 
-    fread(antpos,64*sizeof(float),1,fin);
-    fread(weights,64*48*2*2*sizeof(float),1,fin);
+    fread(antpos,NANT*2*sizeof(float),1,fin);
+    fread(weights,NANT*48*2*2*sizeof(float),1,fin);
 
-    for (int i=0;i<64*48*2;i++) {
+    for (int i=0;i<NANT*48*2;i++) {
       wnorm = sqrt(weights[2*i]*weights[2*i] + weights[2*i+1]*weights[2*i+1]);
-      if (wnorm!=0.0 && donorm==1) {
+      if (wnorm!=0.0) {
 	weights[2*i] /= wnorm*wnorm;
 	weights[2*i+1] /= wnorm*wnorm;
       }
@@ -388,12 +374,12 @@ int init_weights(char * wnam, float *antpos, float *weights, char *flagnam, int 
   }
   else {
 
-    for (int i=0;i<64*48*2;i++) {
+    for (int i=0;i<NANT*48*2;i++) {
       weights[2*i] = 1.;
       weights[2*i+1] = 0.;
     }
 
-    for (int i=0;i<64;i++) {
+    for (int i=0;i<NANT*2;i++) {
       antpos[i] = 0.;
     }
 
@@ -431,15 +417,22 @@ void calc_voltage_weights(float *antpos, float *weights, float *freqs, float *bf
 
   float theta, afac, twr, twi;
   theta = sep*(127.-(float)nBeamNum)*3.14159265358/10800.; // radians
-  for(int nAnt=0;nAnt<64;nAnt++){
+  for(int nAnt=0;nAnt<NANT;nAnt++){
     for(int nChan=0;nChan<48;nChan++){
       for(int nPol=0;nPol<2;nPol++){
 	afac = -2.*3.14159265358*freqs[nChan*8+4]*theta/CVAC; // factor for rotate
 	twr = cos(afac*antpos[nAnt]);
 	twi = sin(afac*antpos[nAnt]);
 
-	bfweights[nAnt*(48*2*2)+nChan*2*2+nPol*2] = (twr*weights[(nAnt*(48*2)+nChan*2+nPol)*2] - twi*weights[(nAnt*(48*2)+nChan*2+nPol)*2+1]);
-	bfweights[nAnt*(48*2*2)+nChan*2*2+nPol*2+1] = (twi*weights[(nAnt*(48*2)+nChan*2+nPol)*2] + twr*weights[(nAnt*(48*2)+nChan*2+nPol)*2+1]);
+	if (nAnt>=NANT/2) {
+	  bfweights[nAnt*(48*2*2)+nChan*2*2+nPol*2] = 0.;
+	  bfweights[nAnt*(48*2*2)+nChan*2*2+nPol*2+1] = 0.;
+	}
+	else {       
+	  bfweights[nAnt*(48*2*2)+nChan*2*2+nPol*2] = (twr*weights[(nAnt*(48*2)+nChan*2+nPol)*2] - twi*weights[(nAnt*(48*2)+nChan*2+nPol)*2+1]);
+	  bfweights[nAnt*(48*2*2)+nChan*2*2+nPol*2+1] = (twi*weights[(nAnt*(48*2)+nChan*2+nPol)*2] + twr*weights[(nAnt*(48*2)+nChan*2+nPol)*2+1]);
+	}
+	
       }
     }
   }
@@ -479,7 +472,6 @@ void usage()
 	   " -q offset from start in number of packets [default 0]\n"
 	   " -g Stokes parameter to output to filterbank, from 0[I], 1[Q], 2[U], 3[V] [default 0]\n"
 	   " -v minimum baseline length (E-W, in m) for input to beamformer [default 0]\n"
-	   " -n do NOT normalize bf weights\n"
 	   " -h print usage\n");
 }
 
@@ -521,9 +513,8 @@ int main (int argc, char *argv[]) {
   int unify=0;
   int stokes=0;
   float minBase=-1.;
-  int donorm = 1;
 
-  while ((arg=getopt(argc,argv,"i:o:t:w:f:c:b:p:d:m:s:q:g:v:nuah")) != -1)
+  while ((arg=getopt(argc,argv,"i:o:t:w:f:c:b:p:d:m:s:q:g:v:uah")) != -1)
     {
       switch (arg)
 	{
@@ -704,9 +695,6 @@ int main (int argc, char *argv[]) {
  	case 'a':
 	  averaging=1;
 	  break;
- 	case 'n':
-	  donorm=0;
-	  break;
  	case 'u':
 	  unify=1;
 	  break;
@@ -737,7 +725,6 @@ int main (int argc, char *argv[]) {
   if (averaging) printf("Will average visibilities by 8x in frequency\n");
   if (delaying) printf("Will apply baseline delays from %s\n",delnam);
   if (dedispersing) printf("Will dedisperse to DM %f, adding delay to 1530MHz\n",dm);
-  if (!donorm) printf("Will not normalize bf weights\n");
 
   // open input and output files
   FILE *fin, *fout, *flout;
@@ -754,7 +741,7 @@ int main (int argc, char *argv[]) {
   
   // read into memory and deal with dedispersion
   printf("initial memory allocation - please stay patient...\n");
-  size_t asize = 2972712960;//NT*NANT*NCHAN*NPTR/((size_t)(2));
+  size_t asize = 4529848320;//NT*NANT*NCHAN*NPTR/((size_t)(2));
   size_t cpsize;
   char *indata = (char *)malloc(sizeof(char)*asize);
   char *d_alldata1, *d_alldata2;
@@ -830,31 +817,31 @@ int main (int argc, char *argv[]) {
   }
   
   // load in weights and antpos
-  float * antpos = (float *)malloc(sizeof(float)*64); // easting
-  float * weights = (float *)malloc(sizeof(float)*64*48*2*2); // complex weights [ant, NW, pol, r/i]
-  float * bfweights = (float *)malloc(sizeof(float)*64*48*2*2); // complex weights [ant, NW, pol, r/i]
+  float * antpos = (float *)malloc(sizeof(float)*NANT*2); // easting
+  float * weights = (float *)malloc(sizeof(float)*NANT*48*2*2); // complex weights [ant, NW, pol, r/i]
+  float * bfweights = (float *)malloc(sizeof(float)*NANT*48*2*2); // complex weights [ant, NW, pol, r/i]
   float * freqs = (float *)malloc(sizeof(float)*NCHAN); // freq
   float * d_freqs;
   cudaMalloc((void **)&d_freqs, NCHAN*sizeof(float));
   for (int i=0;i<NCHAN;i++) freqs[i] = (fch1 - i*250./8192.)*1e6;
   cudaMemcpy(d_freqs,freqs,NCHAN*sizeof(float),cudaMemcpyHostToDevice);
-  init_weights(wnam,antpos,weights,flagnam,weight,doflag,donorm);
+  init_weights(wnam,antpos,weights,flagnam,weight,doflag);
   if (beamn>=0 && beamn<=255)
     calc_voltage_weights(antpos,weights,freqs,bfweights,beamn);
   float *d_weights;
-  cudaMalloc((void **)&d_weights, 64*48*2*2*sizeof(float));
+  cudaMalloc((void **)&d_weights, NANT*48*2*2*sizeof(float));
   float *d_antpos;
-  cudaMalloc((void **)&d_antpos, 64*sizeof(float));
-  cudaMemcpy(d_antpos,antpos,64*sizeof(float),cudaMemcpyHostToDevice);
+  cudaMalloc((void **)&d_antpos, NANT*sizeof(float));
+  cudaMemcpy(d_antpos,antpos,NANT*sizeof(float),cudaMemcpyHostToDevice);
   if (beamn>=0 && beamn<=255)
-    cudaMemcpy(d_weights,bfweights,64*48*2*2*sizeof(float),cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weights,bfweights,NANT*48*2*2*sizeof(float),cudaMemcpyHostToDevice);
   else
-    cudaMemcpy(d_weights,weights,64*48*2*2*sizeof(float),cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weights,weights,NANT*48*2*2*sizeof(float),cudaMemcpyHostToDevice);
   
   // set up a1 and a2
   int ctr=0;
-  for (int i=0;i<63;i++) {
-    for (int j=i;j<63;j++) {
+  for (int i=0;i<NANT;i++) {
+    for (int j=i;j<NANT;j++) {
       h_a1[ctr] = i;
       h_a2[ctr] = j;
       ctr++;
@@ -910,7 +897,7 @@ int main (int argc, char *argv[]) {
 	  }
 	}
 	if (philwriting) {
-	  reduce_corrs<<<NCHAN,512>>>(d_corrout, d_filout, 0.25, d_a1, d_a2, stokes, d_antpos, minBase);
+	  reduce_corrs<<<NCHAN,1024>>>(d_corrout, d_filout, 0.25, d_a1, d_a2, stokes, d_antpos, minBase);
 	  cudaMemcpy(filout, d_filout, NCHAN*sizeof(float), cudaMemcpyDeviceToHost);
 	  fwrite(filout,sizeof(float),NCHAN,flout);
 	}
@@ -929,7 +916,7 @@ int main (int argc, char *argv[]) {
 	  }
 	}
 	if (philwriting) {
-	  reduce_corrs<<<NCHAN,512>>>(d_corrout + NBASE*NCHAN*8, d_filout, 0.25, d_a1, d_a2, stokes, d_antpos, minBase);
+	  reduce_corrs<<<NCHAN,1024>>>(d_corrout + NBASE*NCHAN*8, d_filout, 0.25, d_a1, d_a2, stokes, d_antpos, minBase);
 	  cudaMemcpy(filout, d_filout, NCHAN*sizeof(float), cudaMemcpyDeviceToHost);
 	  fwrite(filout,sizeof(float),NCHAN,flout);
 	}
@@ -954,7 +941,7 @@ int main (int argc, char *argv[]) {
 	  }
 	}
 	if (philwriting) {
-	  reduce_corrs<<<NCHAN,512>>>(d_finalout, d_filout, 4., d_a1, d_a2, stokes, d_antpos, minBase);
+	  reduce_corrs<<<NCHAN,1024>>>(d_finalout, d_filout, 4., d_a1, d_a2, stokes, d_antpos, minBase);
 	  cudaMemcpy(filout, d_filout, NCHAN*sizeof(float), cudaMemcpyDeviceToHost);	  
 	  fwrite(filout,sizeof(float),NCHAN,flout);
 	}

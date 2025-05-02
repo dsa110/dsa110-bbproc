@@ -30,12 +30,12 @@ ghellbourg@astro.caltech.edu
 int NW = 48;    // number of channels for the beamformer
 float PI = 3.141592653589793238;
 float CVAC = 299792458.0;
-
+int NANT = 96;
 
 
 int init_weights(char * fnam, char *flagants, float *antpos, float *weights, int nPols) {
 
-        // assumes 64 antennas
+        // assumes NANT antennas
         // antpos: takes only easting
         // weights: takes [ant, NW==48]
 
@@ -44,7 +44,7 @@ int init_weights(char * fnam, char *flagants, float *antpos, float *weights, int
         FILE *fants;
         int rd;
 
-	int flags[64], nflag=0;
+	int flags[NANT], nflag=0;
         fflag = fopen(flagants,"r");
 	while (!feof(fflag)) {
 	  fscanf(fflag,"%d\n",&flags[nflag]);
@@ -54,11 +54,11 @@ int init_weights(char * fnam, char *flagants, float *antpos, float *weights, int
 	
         fin=fopen(fnam,"rb");
 
-        rd = fread(antpos,64*sizeof(float),1,fin);
-        rd = fread(weights,64*NW*nPols*2*sizeof(float),1,fin);
+        rd = fread(antpos,2*NANT*sizeof(float),1,fin);
+        rd = fread(weights,NANT*NW*nPols*2*sizeof(float),1,fin);
         float wnorm;
 	int i;
-	for (int ii=0;ii<64;ii++) {
+	for (int ii=0;ii<NANT;ii++) {
 	  for (int jj=0;jj<NW*nPols;jj++) {
 	    i = ii*NW*nPols+jj;
 	    wnorm = sqrt(weights[2*i]*weights[2*i] + weights[2*i+1]*weights[2*i+1]);
@@ -86,7 +86,7 @@ void calc_weights(float *antpos, float *weights, float *freqs, float *wr, float 
         float theta, afac, twr, twi;
 
         theta = sep*(127.-(float)nBeamNum)*PI/10800.; // radians
-        for(int nAnt=0;nAnt<64;nAnt++){
+        for(int nAnt=0;nAnt<NANT;nAnt++){
                 for(int nChan=0;nChan<48;nChan++){
                         for(int nPol=0;nPol<nPols;nPol++){
                                 afac = -2.*PI*freqs[nChan*8+4]*theta/CVAC; // factor for rotate
@@ -114,7 +114,7 @@ void calc_weights(float *antpos, float *weights, float *freqs, float *wr, float 
 
 }
 
-void beamformer(char *input, float *wr, float *wi, unsigned char *output, int nChans, int nAnts, int nTimes, int nPols, int incoh) {
+void beamformer(char *input, float *wr, float *wi, unsigned char *output, int nChans, int nTimes, int nPols, int incoh) {
 
         float inr_x, ini_x, inr_y, ini_y;
         float wrx, wix, wry, wiy;
@@ -129,7 +129,7 @@ void beamformer(char *input, float *wr, float *wi, unsigned char *output, int nC
                                 ix = 0;
                                 ry = 0;
                                 iy = 0;
-                                for(int nAnt=0;nAnt<nAnts;nAnt++){
+                                for(int nAnt=0;nAnt<NANT/2;nAnt++){
 				  v = input[nAnt*(nChans*nPols*nTimes)+(nChan*8+i)*(nPols*nTimes)+nTime*2];				  
 				  inr_x = (float)((char)(((unsigned char)(v) & (unsigned char)(15)) << 4) >> 4);
 				  //inr_x = (float)(((char)((v & 15) << 4)) >> 4);
@@ -167,9 +167,9 @@ void beamformer(char *input, float *wr, float *wi, unsigned char *output, int nC
 
                                 }
 				if (!incoh)
-				  output[nTime*nChans+nChan*8+i] = (unsigned char)(32.*16.*(rx*rx + ix*ix + ry*ry + iy*iy) / nAnts / nAnts);
+				  output[nTime*nChans+nChan*8+i] = (unsigned char)(128.*16.*(rx*rx + ix*ix + ry*ry + iy*iy) / NANT / NANT);
 				else
-				  output[nTime*nChans+nChan*8+i] = (unsigned char)(64.*64.*rx/nAnts/nAnts);
+				  output[nTime*nChans+nChan*8+i] = (unsigned char)(64.*64.*rx/NANT/NANT);
                         }
                 }
         }
@@ -197,7 +197,6 @@ int main (int argc, char *argv[]) {
 
 
         int nChans = 384;
-        int nAnts = 63;
         int nPols = 2;
         int nTimes = 2;
 	int incoh = 0;
@@ -271,18 +270,6 @@ int main (int argc, char *argv[]) {
                                 usage();
                                 return EXIT_FAILURE;
                         }
-						case 'a':
-                        if (optarg)
-                        {
-                                nAnts = atoi(optarg);
-                                break;
-                        }
-                        else
-                        {
-                                printf("-a flag requires argument");
-                                usage();
-                                return EXIT_FAILURE;
-                        }
                         case 'u':
                         if (optarg)
                         {
@@ -344,11 +331,11 @@ int main (int argc, char *argv[]) {
         // compute beamformer weights
         //unsigned char * output = (char *)malloc(sizeof(char)*nChans*nTimes);
         unsigned char * output = (unsigned char *)malloc(sizeof(unsigned char)*nChans*nTimes);
-        unsigned char * input = (char *)malloc(sizeof(char)*nAnts*nChans*nTimes*nPols);
-        float * antpos = (float *)malloc(sizeof(float)*64); // easting
-        float * weights = (float *)malloc(sizeof(float)*64*NW*nPols*2); // complex weights [ant, NW, pol, r/i]
-        float * wr = (float *)malloc(sizeof(float)*64*NW*nPols); // complex weights [ant, NW, pol]
-        float * wi = (float *)malloc(sizeof(float)*64*NW*nPols); // complex weights [ant, NW, pol]
+        unsigned char * input = (char *)malloc(sizeof(char)*NANT*nChans*nTimes*nPols);
+        float * antpos = (float *)malloc(sizeof(float)*NANT*2); // easting
+        float * weights = (float *)malloc(sizeof(float)*NANT*NW*nPols*2); // complex weights [ant, NW, pol, r/i]
+        float * wr = (float *)malloc(sizeof(float)*NANT*NW*nPols); // complex weights [ant, NW, pol]
+        float * wi = (float *)malloc(sizeof(float)*NANT*NW*nPols); // complex weights [ant, NW, pol]
         float * freqs = (float *)malloc(sizeof(float)*nChans); // freq
         for (int i=0;i<nChans;i++) freqs[i] = (fch1 - i*250./8192.)*1e6;
         init_weights(fnam,fflag,antpos,weights,nPols);
@@ -359,10 +346,10 @@ int main (int argc, char *argv[]) {
         ptr = fopen(fdata,"rb");  // r for read, b for binary
         write_ptr = fopen(fout,"wb");  // w for write, b for binary
 
-        long int sz;
-        fseek(ptr, 0L, SEEK_END);
-        sz = ftell(ptr);
-        rewind(ptr);
+        //long int sz;
+        //fseek(ptr, 0L, SEEK_END);
+        //sz = ftell(ptr);
+        //rewind(ptr);
 	//fseek(ptr, 369169920L, SEEK_SET);
         //int nTotSam = (int)(floor(sz / (nAnts*nChans*nTimes*nPols)));
 	int nTotSam = 32768;
@@ -370,9 +357,9 @@ int main (int argc, char *argv[]) {
         int rd;
         for(int nSam = 0; nSam < nTotSam; nSam++) {
 
-                rd = fread(input,nAnts*nChans*nTimes*nPols,1,ptr);
+                rd = fread(input,NANT*nChans*nTimes*nPols,1,ptr);
 
-                beamformer(input,wr,wi,output,nChans,nAnts,nTimes,nPols,incoh);
+                beamformer(input,wr,wi,output,nChans,nTimes,nPols,incoh);
 
                 fwrite(output,sizeof(unsigned char),nChans*nTimes,write_ptr);
 
