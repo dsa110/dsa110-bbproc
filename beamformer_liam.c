@@ -40,6 +40,82 @@ int init_weights(char * fnam, char *flagants, float *antpos, float *weights, int
         // weights: takes [ant, NW==48]
 
         FILE *fin;
+        FILE *f_used_ants;
+        int rd;
+
+        // --- MODIFICATION START ---
+        // The file now contains a list of antennas TO USE.
+        int used_ants[NANT], n_used=0;
+        f_used_ants = fopen(flagants,"r");
+        if (f_used_ants == NULL) {
+            perror("Error opening antenna list file");
+            return 1; // Return an error
+        }
+        // Read all antenna numbers from the file
+        while (!feof(f_used_ants) && n_used < NANT) {
+            if (fscanf(f_used_ants, "%d\n", &used_ants[n_used]) == 1) {
+                n_used++;
+            }
+        }
+        fclose(f_used_ants);
+        // --- MODIFICATION END ---
+	
+        fin=fopen(fnam,"rb");
+        if (fin == NULL) {
+            perror("Error opening calibration weight file");
+            return 1; // Return an error
+        }
+        rd = fread(antpos,2*NANT*sizeof(float),1,fin);
+        rd = fread(weights,NANT*NW*nPols*2*sizeof(float),1,fin);
+        fclose(fin);
+
+        float wnorm;
+        int i;
+
+        // --- MODIFICATION START ---
+        // Loop over all possible antennas (0 to NANT-1)
+        for (int ii=0; ii<NANT; ii++) {
+            
+            // Check if the current antenna 'ii' is in our list of antennas to use
+            int is_used = 0; // Flag to check if antenna should be used
+            for (int kk=0; kk<n_used; kk++) {
+                if (used_ants[kk] == ii) {
+                    is_used = 1;
+                    break; // Found it, no need to search further
+                }
+            }
+
+            // Now, apply the weights based on whether the antenna is used or not
+            for (int jj=0; jj<NW*nPols; jj++) {
+                i = ii*NW*nPols+jj;
+
+                if (is_used) {
+                    // This antenna IS in the list, so we use its calibration weights
+                    // and normalize them to unit length.
+                    wnorm = sqrt(weights[2*i]*weights[2*i] + weights[2*i+1]*weights[2*i+1]);
+                    if (wnorm != 0.0) {
+                        weights[2*i] /= wnorm;
+                        weights[2*i+1] /= wnorm;
+                    }
+                } else {
+                    // This antenna IS NOT in the list, so we zero out its weights.
+                    weights[2*i] = 0.0;
+                    weights[2*i+1] = 0.0;
+                }
+            }
+        }
+        // --- MODIFICATION END ---
+
+        return 0;
+}
+
+int init_weights_old(char * fnam, char *flagants, float *antpos, float *weights, int nPols) {
+
+        // assumes NANT antennas
+        // antpos: takes only easting
+        // weights: takes [ant, NW==48]
+
+        FILE *fin;
 	FILE *fflag;
         FILE *fants;
         int rd;
@@ -114,8 +190,7 @@ void calc_weights(float *antpos, float *weights, float *freqs, float *wr, float 
 
 }
 
-void beamformer(char *input, float *wr, float *wi,
-                float *output, int nChans, int nTimes, int nPols, int incoh){
+void beamformer(char *input, float *wr, float *wi, unsigned char *output, int nChans, int nTimes, int nPols, int incoh) {
 
         float inr_x, ini_x, inr_y, ini_y;
         float wrx, wix, wry, wiy;
@@ -123,42 +198,59 @@ void beamformer(char *input, float *wr, float *wi,
         float tmprealX, tmpimagX, tmprealY, tmpimagY;
 	char v;
 
-for (int nTime=0; nTime<nTimes; nTime++){
-    for (int nChan=0; nChan<48; nChan++){
-        for (int i=0; i<8; i++){
-            rx = ix = ry = iy = 0.0f;
-            for (int nAnt=0; nAnt<NANT/2; nAnt++){
-                v = input[nAnt*(nChans*nPols*nTimes)+(nChan*8+i)*(nPols*nTimes)+nTime*2];
-                inr_x = (float)((char)(((unsigned char)(v)&15)<<4)>>4);
-                ini_x = (float)((char)(((unsigned char)(v)&240))>>4);
-                v = input[nAnt*(nChans*nPols*nTimes)+(nChan*8+i)*(nPols*nTimes)+nTime*2+1];
-                inr_y = (float)((char)(((unsigned char)(v)&15)<<4)>>4);
-                ini_y = (float)((char)(((unsigned char)(v)&240))>>4);
+        for(int nTime=0;nTime<nTimes;nTime++){
+                for(int nChan=0;nChan<48;nChan++){
+                        for(int i=0;i<8;i++){
+                                rx = 0;
+                                ix = 0;
+                                ry = 0;
+                                iy = 0;
+                                for(int nAnt=0;nAnt<NANT/2;nAnt++){
+				  v = input[nAnt*(nChans*nPols*nTimes)+(nChan*8+i)*(nPols*nTimes)+nTime*2];				  
+				  inr_x = (float)((char)(((unsigned char)(v) & (unsigned char)(15)) << 4) >> 4);
+				  //inr_x = (float)(((char)((v & 15) << 4)) >> 4);
+				  v = input[nAnt*(nChans*nPols*nTimes)+(nChan*8+i)*(nPols*nTimes)+nTime*2];
+				  ini_x = (float)((char)(((unsigned char)(v) & (unsigned char)(240))) >> 4);
+				  //ini_x = (float)(((char)((v & 240))) >> 4);
+				  v = input[nAnt*(nChans*nPols*nTimes)+(nChan*8+i)*(nPols*nTimes)+nTime*2+1];
+				  inr_y = (float)((char)(((unsigned char)(v) & (unsigned char)(15)) << 4) >> 4);
+				  //inr_y = (float)(((char)((v & 15) << 4)) >> 4);
+				  v = input[nAnt*(nChans*nPols*nTimes)+(nChan*8+i)*(nPols*nTimes)+nTime*2+1];
+				  ini_y = (float)((char)(((unsigned char)(v) & (unsigned char)(240))) >> 4);
+				  //ini_y = (float)(((char)((v & 240))) >> 4);
 
-                if (!incoh) {
-                    wrx = wr[nAnt*(48*nPols)+nChan*nPols];
-                    wix = wi[nAnt*(48*nPols)+nChan*nPols];
-                    wry = wr[nAnt*(48*nPols)+nChan*nPols+1];
-                    wiy = wi[nAnt*(48*nPols)+nChan*nPols+1];
-                    rx += inr_x*wrx - ini_x*wix;
-                    ix += inr_x*wix + ini_x*wrx;
-                    ry += inr_y*wry - ini_y*wiy;
-                    iy += inr_y*wiy + ini_y*wry;
-                } else {
-                    // sum of per-antenna powers (autocorrelations)
-                    rx += inr_x*inr_x + ini_x*ini_x + inr_y*inr_y + ini_y*ini_y;
+                                        /***********/
+                                        /*towrite[nAnt*(nChans*nTimes*nPols*2)+(nChan*8+i)*(nPols*nTimes*2)+nTime*nPols*2  ] = (int)inr_x;
+                                        towrite[nAnt*(nChans*nTimes*nPols*2)+(nChan*8+i)*(nPols*nTimes*2)+nTime*nPols*2+1] = (int)ini_x;
+                                        towrite[nAnt*(nChans*nTimes*nPols*2)+(nChan*8+i)*(nPols*nTimes*2)+nTime*nPols*2+2] = (int)inr_y;
+                                        towrite[nAnt*(nChans*nTimes*nPols*2)+(nChan*8+i)*(nPols*nTimes*2)+nTime*nPols*2+3] = (int)ini_y;*/
+                                        /***********/
+
+                                        wrx = wr[nAnt*(48*nPols)+nChan*nPols];
+                                        wix = wi[nAnt*(48*nPols)+nChan*nPols];
+                                        wry = wr[nAnt*(48*nPols)+nChan*nPols+1];
+                                        wiy = wi[nAnt*(48*nPols)+nChan*nPols+1];
+
+					if (!incoh) {
+					  rx += inr_x*wrx - ini_x*wix;
+					  ix += inr_x*wix + ini_x*wrx;
+					  ry += inr_y*wry - ini_y*wiy;
+					  iy += inr_y*wiy + ini_y*wry;
+					}
+					else {
+					  rx += inr_x*inr_x*wrx*wrx + inr_y*inr_y*wry*wry + ini_x*ini_x*wix*wix + ini_y*ini_y*wiy*wiy;
+					}
+
+                                }
+				if (!incoh)
+				  output[nTime*nChans+nChan*8+i] = (unsigned char)(128.*16.*(rx*rx + ix*ix + ry*ry + iy*iy) / NANT / NANT);
+				else
+				  output[nTime*nChans+nChan*8+i] = (unsigned char)(64.*64.*rx/NANT/NANT);
+                        }
                 }
-            }
-            if (!incoh)
-                output[nTime*nChans + nChan*8 + i] =
-                    128.f * 16.f * (rx*rx + ix*ix + ry*ry + iy*iy) / (float)(NANT*NANT);
-            else
-                output[nTime*nChans + nChan*8 + i] =
-                    (unsigned char)(rx / NANT);
         }
-    }
- }}
- 
+}
+
 void usage()
 {
   fprintf (stdout,
@@ -314,7 +406,7 @@ int main (int argc, char *argv[]) {
 
         // compute beamformer weights
         //unsigned char * output = (char *)malloc(sizeof(char)*nChans*nTimes);
-	float * output = (float *)malloc(sizeof(float)*nChans*nTimes);
+        unsigned char * output = (unsigned char *)malloc(sizeof(unsigned char)*nChans*nTimes);
         unsigned char * input = (char *)malloc(sizeof(char)*NANT*nChans*nTimes*nPols);
         float * antpos = (float *)malloc(sizeof(float)*NANT*2); // easting
         float * weights = (float *)malloc(sizeof(float)*NANT*NW*nPols*2); // complex weights [ant, NW, pol, r/i]
@@ -345,8 +437,7 @@ int main (int argc, char *argv[]) {
 
                 beamformer(input,wr,wi,output,nChans,nTimes,nPols,incoh);
 
-		//                fwrite(output,sizeof(unsigned char),nChans*nTimes,write_ptr);
-		fwrite(output, sizeof(float), nChans*nTimes, write_ptr);
+                fwrite(output,sizeof(unsigned char),nChans*nTimes,write_ptr);
 
         }
         fclose(ptr);

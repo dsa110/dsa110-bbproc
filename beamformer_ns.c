@@ -1,15 +1,21 @@
-/*gcc -o beamformer beamformer.c -I/usr/local/include -L/usr/local/lib -lm -g -O2 -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran
+/*gcc -o beamformer_ns beamformer_ns.c -I/usr/local/include -L/usr/local/lib -lm -g -O2 -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran
 python beamformer was too slow, decided to use python to write up header etc but do actual beamforming in C.
-This code should take 8 parameters:
+This code should take parameters:
 * data file name
 * calibration file name
 * number of antennas in voltage file
 * number of antennas to use in beamforming
 * start frequency
-* separation
-* beam number
+* separation (E/W)
+* separation (N/S)
+* beam number (0-255 for E/W, 256-511 for N/S)
+* DEC (declination in degrees, required for N/S beams)
 * output file name
 assumes 48 channels for beamformer (weights for 8 data channels), ONLY 1 beam
+
+Extended from beamformer.c to support N/S beams (256-511) using the second 48 antennas.
+N/S beam weights calculated as in dsaX_bfCorr.cu.
+
 greg hellbourg
 ghellbourg@astro.caltech.edu
 */
@@ -30,13 +36,14 @@ ghellbourg@astro.caltech.edu
 int NW = 48;    // number of channels for the beamformer
 float PI = 3.141592653589793238;
 float CVAC = 299792458.0;
+float DSA_LAT = 37.23;  // DSA-110 latitude in degrees
 int NANT = 96;
 
 
 int init_weights(char * fnam, char *flagants, float *antpos, float *weights, int nPols) {
 
         // assumes NANT antennas
-        // antpos: takes only easting
+        // antpos: takes eastings (first NANT) and northings (second NANT)
         // weights: takes [ant, NW==48]
 
         FILE *fin;
@@ -80,47 +87,61 @@ int init_weights(char * fnam, char *flagants, float *antpos, float *weights, int
 
 }
 
-void calc_weights(float *antpos, float *weights, float *freqs, float *wr, float *wi, float sep, float nBeamNum, int nPols) {
-
+void calc_weights(float *antpos, float *weights, float *freqs, float *wr, float *wi, float sep, float sep_ns, float nBeamNum, float dec, int nPols) {
 
         float theta, afac, twr, twi;
+        int is_ns = (nBeamNum >= 256.0);  // N/S beam if >= 256
+        float internal_beam = is_ns ? (nBeamNum - 256.0) : nBeamNum;
+        int ant_offset = is_ns ? (NANT/2) : 0;  // Use antennas 48-95 for N/S, 0-47 for E/W
 
-        theta = sep*(127.-(float)nBeamNum)*PI/10800.; // radians
-        for(int nAnt=0;nAnt<NANT;nAnt++){
-                for(int nChan=0;nChan<48;nChan++){
-                        for(int nPol=0;nPol<nPols;nPol++){
-                                afac = -2.*PI*freqs[nChan*8+4]*theta/CVAC; // factor for rotate
-                                twr = cos(afac*antpos[nAnt]);
-                                twi = sin(afac*antpos[nAnt]);
+        if (is_ns) {
+                // N/S beam: theta includes DEC offset, use sin(theta) in afac
+                theta = sep_ns*(127.-internal_beam)*PI/10800. - (PI/180.)*(DSA_LAT - dec); // radians
+                for(int nAnt=0;nAnt<NANT;nAnt++){
+                        for(int nChan=0;nChan<48;nChan++){
+                                for(int nPol=0;nPol<nPols;nPol++){
+                                        afac = -2.*PI*freqs[nChan*8+4]*sin(theta)/CVAC; // factor for rotate (sin(theta) for N/S)
+                                        // Use northing position for antennas 48-95: antpos[nAnt + NANT]
+                                        // Note: antpos layout is [96 eastings, 96 northings]
+                                        // So antpos[nAnt + NANT] = northing of antenna nAnt
+                                        twr = cos(afac*antpos[nAnt + NANT]);
+                                        twi = sin(afac*antpos[nAnt + NANT]);
 
-                                wr[nAnt*(48*nPols)+nChan*nPols+nPol] = (twr*weights[(nAnt*(48*nPols)+nChan*nPols+nPol)*2] - twi*weights[(nAnt*(48*nPols)+nChan*nPols+nPol)*2+1]);
-                                wi[nAnt*(48*nPols)+nChan*nPols+nPol] = (twi*weights[(nAnt*(48*nPols)+nChan*nPols+nPol)*2] + twr*weights[(nAnt*(48*nPols)+nChan*nPols+nPol)*2+1]);
+                                        wr[nAnt*(48*nPols)+nChan*nPols+nPol] = (twr*weights[(nAnt*(48*nPols)+nChan*nPols+nPol)*2] - twi*weights[(nAnt*(48*nPols)+nChan*nPols+nPol)*2+1]);
+                                        wi[nAnt*(48*nPols)+nChan*nPols+nPol] = (twi*weights[(nAnt*(48*nPols)+nChan*nPols+nPol)*2] + twr*weights[(nAnt*(48*nPols)+nChan*nPols+nPol)*2+1]);
+                                }
+                        }
+                }
+        } else {
+                // E/W beam: original calculation
+                theta = sep*(127.-internal_beam)*PI/10800.; // radians
+                for(int nAnt=0;nAnt<NANT;nAnt++){
+                        for(int nChan=0;nChan<48;nChan++){
+                                for(int nPol=0;nPol<nPols;nPol++){
+                                        afac = -2.*PI*freqs[nChan*8+4]*theta/CVAC; // factor for rotate
+                                        // Use easting position: antpos[nAnt]
+                                        twr = cos(afac*antpos[nAnt]);
+                                        twi = sin(afac*antpos[nAnt]);
+
+                                        wr[nAnt*(48*nPols)+nChan*nPols+nPol] = (twr*weights[(nAnt*(48*nPols)+nChan*nPols+nPol)*2] - twi*weights[(nAnt*(48*nPols)+nChan*nPols+nPol)*2+1]);
+                                        wi[nAnt*(48*nPols)+nChan*nPols+nPol] = (twi*weights[(nAnt*(48*nPols)+nChan*nPols+nPol)*2] + twr*weights[(nAnt*(48*nPols)+nChan*nPols+nPol)*2+1]);
+                                }
                         }
                 }
         }
-
-/* write beamformer weights, if needed -- can be made optional? */
-/*
-        FILE *write_ptr;
-        char filename[100];
-        sprintf(filename, "/home/user/T3_detect/testdir/beamweights_%d", nBeamNum);
-        write_ptr = fopen(filename,"wb");
-        fwrite(wr,sizeof(float),64*48*2,write_ptr);
-        fwrite(wi,sizeof(float),64*48*2,write_ptr);
-        fclose(write_ptr);
-        printf("wrote beamformer weights -- size = %d\n",(int)sizeof(float));
-        printf("data written as int -- size = %d\n",(int)sizeof(int));
-*/
-
 }
 
-void beamformer(char *input, float *wr, float *wi, unsigned char *output, int nChans, int nTimes, int nPols, int incoh) {
+void beamformer(char *input, float *wr, float *wi, unsigned char *output, int nChans, int nTimes, int nPols, int incoh, float nBeamNum) {
 
         float inr_x, ini_x, inr_y, ini_y;
         float wrx, wix, wry, wiy;
         float rx, ix, ry, iy;
         float tmprealX, tmpimagX, tmprealY, tmpimagY;
 	char v;
+
+        int is_ns = (nBeamNum >= 256.0);  // N/S beam if >= 256
+        int ant_start = is_ns ? (NANT/2) : 0;  // Start at antenna 48 for N/S, 0 for E/W
+        int ant_end = is_ns ? NANT : (NANT/2);  // End at antenna 96 for N/S, 48 for E/W
 
         for(int nTime=0;nTime<nTimes;nTime++){
                 for(int nChan=0;nChan<48;nChan++){
@@ -129,7 +150,7 @@ void beamformer(char *input, float *wr, float *wi, unsigned char *output, int nC
                                 ix = 0;
                                 ry = 0;
                                 iy = 0;
-                                for(int nAnt=0;nAnt<NANT/2;nAnt++){
+                                for(int nAnt=ant_start;nAnt<ant_end;nAnt++){
 				  v = input[nAnt*(nChans*nPols*nTimes)+(nChan*8+i)*(nPols*nTimes)+nTime*2];				  
 				  inr_x = (float)((char)(((unsigned char)(v) & (unsigned char)(15)) << 4) >> 4);
 				  //inr_x = (float)(((char)((v & 15) << 4)) >> 4);
@@ -178,17 +199,19 @@ void beamformer(char *input, float *wr, float *wi, unsigned char *output, int nC
 void usage()
 {
   fprintf (stdout,
-           "t3_beamformer [options]\n"
+           "beamformer_ns [options]\n"
            " -d voltage data file name [no default]\n"
            " -f calibration file name [no default]\n"
            " -o output file name [no default]\n"
-		   " -a number of antennas in file [default 30]\n"
-		   " -u number of antennas to be used [default 24]\n"
+           " -a number of antennas in file [default 30]\n"
+           " -u number of antennas to be used [default 24]\n"
            " -z fch1 in MHz [default 1530]\n"
-           " -s interbeam separation in arcmin [default 1.4]\n"
-           " -n beam number [0 -- 255, default 127]\n"
-	   " -i incoherent beamforming\n"
-	   " -q flagants file [no default]\n"
+           " -s E/W interbeam separation in arcmin [default 1.4]\n"
+           " -S N/S interbeam separation in arcmin [default 1.0]\n"
+           " -n beam number [0-255 for E/W, 256-511 for N/S, default 127]\n"
+           " -g DEC in degrees [required for N/S beams 256-511]\n"
+           " -i incoherent beamforming\n"
+           " -q flagants file [no default]\n"
            " -h print usage\n");
 }
 
@@ -205,7 +228,10 @@ int main (int argc, char *argv[]) {
         int arg = 0;
         float fch1 = 1530.0;
         float sep = 1;
+        float sep_ns = 1.0;  // N/S beam separation
         float nBeamNum = 127.;
+        float dec = 0.0;  // DEC in degrees
+        int dec_provided = 0;  // flag to check if DEC was provided
 	int nUsedAnts;
         char * fnam;
         fnam=(char *)malloc(sizeof(char)*200);
@@ -219,7 +245,7 @@ int main (int argc, char *argv[]) {
         fout=(char *)malloc(sizeof(char)*200);
         sprintf(fout,"nofile");
 
-        while ((arg=getopt(argc,argv,"d:f:o:a:u:z:s:n:q:ih")) != -1)
+        while ((arg=getopt(argc,argv,"d:f:o:a:u:z:s:S:n:g:q:ih")) != -1)
         {
                 switch (arg)
                 {
@@ -283,7 +309,7 @@ int main (int argc, char *argv[]) {
                                 usage();
                                 return EXIT_FAILURE;
                         }
-						case 'z':
+			case 'z':
                         if (optarg)
                         {
                                 fch1 = atof(optarg);
@@ -307,6 +333,18 @@ int main (int argc, char *argv[]) {
                                 usage();
                                 return EXIT_FAILURE;
                         }
+                        case 'S':
+                        if (optarg)
+                        {
+                                sep_ns = atof(optarg);
+                                break;
+                        }
+                        else
+                        {
+                                printf("-S flag requires argument");
+                                usage();
+                                return EXIT_FAILURE;
+                        }
                         case 'n':
                         if (optarg)
                         {
@@ -319,6 +357,19 @@ int main (int argc, char *argv[]) {
                                 usage();
                                 return EXIT_FAILURE;
                         }
+                        case 'g':
+                        if (optarg)
+                        {
+                                dec = atof(optarg);
+                                dec_provided = 1;
+                                break;
+                        }
+                        else
+                        {
+                                printf("-g flag requires argument");
+                                usage();
+                                return EXIT_FAILURE;
+                        }
                         case 'h':
                         usage();
                         return EXIT_SUCCESS;
@@ -328,19 +379,41 @@ int main (int argc, char *argv[]) {
                 }
         }
 
+        // Validate: DEC is required for N/S beams (256-511)
+        if (nBeamNum >= 256.0 && !dec_provided) {
+                printf("Error: DEC (-g) is required for N/S beams (256-511)\n");
+                usage();
+                return EXIT_FAILURE;
+        }
+
+        // Validate beam number range
+        if (nBeamNum < 0 || nBeamNum > 511) {
+                printf("Error: Beam number must be between 0 and 511\n");
+                usage();
+                return EXIT_FAILURE;
+        }
+
+        // Print info about which array arm is being used
+        if (nBeamNum >= 256.0) {
+                printf("Using N/S array (antennas 48-95), beam %d (internal beam %d), DEC=%.2f deg\n", 
+                       (int)nBeamNum, (int)(nBeamNum - 256), dec);
+        } else {
+                printf("Using E/W array (antennas 0-47), beam %d\n", (int)nBeamNum);
+        }
+
 
         // compute beamformer weights
         //unsigned char * output = (char *)malloc(sizeof(char)*nChans*nTimes);
         unsigned char * output = (unsigned char *)malloc(sizeof(unsigned char)*nChans*nTimes);
         unsigned char * input = (char *)malloc(sizeof(char)*NANT*nChans*nTimes*nPols);
-        float * antpos = (float *)malloc(sizeof(float)*NANT*2); // easting
+        float * antpos = (float *)malloc(sizeof(float)*NANT*2); // easting and northing
         float * weights = (float *)malloc(sizeof(float)*NANT*NW*nPols*2); // complex weights [ant, NW, pol, r/i]
         float * wr = (float *)malloc(sizeof(float)*NANT*NW*nPols); // complex weights [ant, NW, pol]
         float * wi = (float *)malloc(sizeof(float)*NANT*NW*nPols); // complex weights [ant, NW, pol]
         float * freqs = (float *)malloc(sizeof(float)*nChans); // freq
         for (int i=0;i<nChans;i++) freqs[i] = (fch1 - i*250./8192.)*1e6;
         init_weights(fnam,fflag,antpos,weights,nPols);
-        calc_weights(antpos,weights,freqs,wr,wi,sep,nBeamNum,nPols);
+        calc_weights(antpos,weights,freqs,wr,wi,sep,sep_ns,nBeamNum,dec,nPols);
 
         FILE *ptr;
         FILE *write_ptr;
@@ -360,7 +433,7 @@ int main (int argc, char *argv[]) {
 
                 rd = fread(input,NANT*nChans*nTimes*nPols,1,ptr);
 
-                beamformer(input,wr,wi,output,nChans,nTimes,nPols,incoh);
+                beamformer(input,wr,wi,output,nChans,nTimes,nPols,incoh,nBeamNum);
 
                 fwrite(output,sizeof(unsigned char),nChans*nTimes,write_ptr);
 

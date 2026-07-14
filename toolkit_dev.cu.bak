@@ -279,7 +279,6 @@ __global__ void delayer(float *input, float *freqs, float *delays) {
   int basel = (int)(bci / NCHAN);
   int ch = (int)(bci % NCHAN);
 
-  // VR edit
   float vr, vi, arg=-2.*3.14159265359*freqs[ch]*delays[basel]*1e-9;
   vr = input[2*iidx]*cosf(arg) - input[2*iidx+1]*sinf(arg);
   __syncthreads();
@@ -440,32 +439,6 @@ void calc_voltage_weights(float *antpos, float *weights, float *freqs, float *bf
 
 }
 
-void calc_voltage_weights_given(float *ants, float *weights, float *freqs, float *bfweights);
-void calc_voltage_weights_given(float *ants, float *weights, float *freqs, float *bfweights) {
-
-  float theta, afac, twr, twi;
-  for(int nAnt=0;nAnt<NANT;nAnt++){
-    for(int nChan=0;nChan<48;nChan++){
-      for(int nPol=0;nPol<2;nPol++){
-	twr = cos(2.*3.14159265358*ants[nAnt]*1e-9*freqs[nChan*8+4]);
-	twi = sin(2.*3.14159265358*ants[nAnt]*1e-9*freqs[nChan*8+4]);
-
-	if (nAnt<NANT/2) {
-	  bfweights[nAnt*(48*2*2)+nChan*2*2+nPol*2] = 0.;
-	  bfweights[nAnt*(48*2*2)+nChan*2*2+nPol*2+1] = 0.;
-	}
-	else {       
-
-	  bfweights[nAnt*(48*2*2)+nChan*2*2+nPol*2] = (twr*weights[(nAnt*(48*2)+nChan*2+nPol)*2] - twi*weights[(nAnt*(48*2)+nChan*2+nPol)*2+1]);
-	  bfweights[nAnt*(48*2*2)+nChan*2*2+nPol*2+1] = (twi*weights[(nAnt*(48*2)+nChan*2+nPol)*2] + twr*weights[(nAnt*(48*2)+nChan*2+nPol)*2+1]);
-	}
-	
-      }
-    }
-  }
-
-}
-
 // only does Stokes I for now
 void sum_to_filterbank(float *corrout, unsigned char *filout) {
 
@@ -490,7 +463,6 @@ void usage()
 	   " -f optional antenna flags file\n"
 	   " -c set frequency of first channel in MHz [default 1530.0]\n"
 	   " -b optionally set in 0-255 to rotate voltages to beam\n"
-	   " -e optionally give file containing phase factors to rotate to specific location\n"
 	   " -p coherent philterbank writing file [no default - will not write if none given]\n"
 	   " -d file with NBASE delays to remove from baselines [optional - no default]\n"
 	   " -a average visibilities by 8x in frequency\n"
@@ -515,27 +487,24 @@ int main (int argc, char *argv[]) {
   // command line arguments
   int arg = 0;
   char * finnam;
-  finnam=(char *)malloc(sizeof(char)*200);
+  finnam=(char *)malloc(sizeof(char)*100);
   char * foutnam;
-  foutnam=(char *)malloc(sizeof(char)*200);
+  foutnam=(char *)malloc(sizeof(char)*100);
   int writing=0;
   int tint = 8;
   char * wnam;
-  wnam=(char *)malloc(sizeof(char)*200);
+  wnam=(char *)malloc(sizeof(char)*100);
   char * flagnam;
-  flagnam=(char *)malloc(sizeof(char)*200);
+  flagnam=(char *)malloc(sizeof(char)*100);
   int weight=0, doflag=0;
   int beamn = -1;
   float fch1 = 1530.;
   char * filnam;
-  filnam = (char *)malloc(sizeof(char)*200);
+  filnam = (char *)malloc(sizeof(char)*100);
   int philwriting = 0;
   char * delnam;
-  delnam = (char *)malloc(sizeof(char)*200);
+  delnam = (char *)malloc(sizeof(char)*100);
   int delaying = 0;
-  char * bantsnam;
-  bantsnam = (char *)malloc(sizeof(char)*200);
-  int burstw = 0;
   int averaging = 0;
   int dedispersing = 0;
   float dm = 0.;
@@ -545,7 +514,7 @@ int main (int argc, char *argv[]) {
   int stokes=0;
   float minBase=-1.;
 
-  while ((arg=getopt(argc,argv,"i:o:t:w:f:c:b:p:d:m:s:q:g:v:e:uah")) != -1)
+  while ((arg=getopt(argc,argv,"i:o:t:w:f:c:b:p:d:m:s:q:g:v:uah")) != -1)
     {
       switch (arg)
 	{
@@ -687,19 +656,6 @@ int main (int argc, char *argv[]) {
 	      usage();
 	      return EXIT_FAILURE;
 	    }
-	case 'e':
-	  if (optarg)
-	    {
-	      strcpy(bantsnam,optarg);
-	      burstw=1;
-	      break;
-	    }
-	  else
-	    {
-	      syslog(LOG_ERR,"-e flag requires argument");
-	      usage();
-	      return EXIT_FAILURE;
-	    }
 	case 'c':
 	  if (optarg)
 	    {
@@ -763,10 +719,6 @@ int main (int argc, char *argv[]) {
   printf("Assuming fch1 %f MHz\n",fch1);
   if (weight) printf("Will weight voltages using %s\n",wnam);
   if (doflag) printf("Will flag antennas using %s\n",flagnam);
-  if (burstw == 1) {
-    beamn = -1;
-    printf("Will rotate voltages to burst location with bants file %s\n",bantsnam);
-  }
   if (beamn>=0 && beamn <=255) printf("Will rotate voltages to beam %d\n",beamn);
   else
     printf("Not rotating voltages with beamn %d\n",beamn);
@@ -850,7 +802,6 @@ int main (int argc, char *argv[]) {
 
   // load in delays
   float * h_delays = (float *)malloc(sizeof(float)*NBASE);
-  float * h_bants = (float *)malloc(sizeof(float)*NANT);
   float * d_delays;
   cudaMalloc((void **)&d_delays, NBASE*sizeof(float));
   FILE *fdel;
@@ -864,15 +815,6 @@ int main (int argc, char *argv[]) {
     fclose(fdel);
     cudaMemcpy(d_delays,h_delays,NBASE*sizeof(float),cudaMemcpyHostToDevice);
   }
-  if (burstw) {
-   if (!(fdel=fopen(bantsnam,"r"))) {
-      printf("could not open bants file %s\n",bantsnam);
-      return(1);
-    }
-    for (int i=0;i<NANT;i++)
-      fscanf(fdel,"%f\n",&h_bants[i]);
-    fclose(fdel);
-  } 
   
   // load in weights and antpos
   float * antpos = (float *)malloc(sizeof(float)*NANT*2); // easting
@@ -886,16 +828,12 @@ int main (int argc, char *argv[]) {
   init_weights(wnam,antpos,weights,flagnam,weight,doflag);
   if (beamn>=0 && beamn<=255)
     calc_voltage_weights(antpos,weights,freqs,bfweights,beamn);
-  if (burstw==1)
-    calc_voltage_weights_given(h_bants,weights,freqs,bfweights);
   float *d_weights;
   cudaMalloc((void **)&d_weights, NANT*48*2*2*sizeof(float));
   float *d_antpos;
   cudaMalloc((void **)&d_antpos, NANT*sizeof(float));
   cudaMemcpy(d_antpos,antpos,NANT*sizeof(float),cudaMemcpyHostToDevice);
   if (beamn>=0 && beamn<=255)
-    cudaMemcpy(d_weights,bfweights,NANT*48*2*2*sizeof(float),cudaMemcpyHostToDevice);
-  else if (burstw==1)
     cudaMemcpy(d_weights,bfweights,NANT*48*2*2*sizeof(float),cudaMemcpyHostToDevice);
   else
     cudaMemcpy(d_weights,weights,NANT*48*2*2*sizeof(float),cudaMemcpyHostToDevice);
@@ -959,15 +897,7 @@ int main (int argc, char *argv[]) {
 	  }
 	}
 	if (philwriting) {
-
-	  if (delaying) {
-	    delayer<<<NBASE*NCHAN*4/32, 32>>>(d_corrout, d_freqs, d_delays);
-	    //printf("Applying baseline delays before writing philterbank\n");
-	  }
-
-	  cudaDeviceSynchronize();
 	  reduce_corrs<<<NCHAN,1024>>>(d_corrout, d_filout, 0.25, d_a1, d_a2, stokes, d_antpos, minBase);
-	  cudaDeviceSynchronize();
 	  cudaMemcpy(filout, d_filout, NCHAN*sizeof(float), cudaMemcpyDeviceToHost);
 	  fwrite(filout,sizeof(float),NCHAN,flout);
 	}
@@ -986,15 +916,7 @@ int main (int argc, char *argv[]) {
 	  }
 	}
 	if (philwriting) {
-
-	  if (delaying) {
-	    delayer<<<NBASE*NCHAN*4/32, 32>>>(d_corrout + NBASE*NCHAN*8, d_freqs, d_delays);
-	    //printf("Applying baseline delays before writing philterbank\n");
-	  }
-	  
-	  cudaDeviceSynchronize();
 	  reduce_corrs<<<NCHAN,1024>>>(d_corrout + NBASE*NCHAN*8, d_filout, 0.25, d_a1, d_a2, stokes, d_antpos, minBase);
-	  cudaDeviceSynchronize();
 	  cudaMemcpy(filout, d_filout, NCHAN*sizeof(float), cudaMemcpyDeviceToHost);
 	  fwrite(filout,sizeof(float),NCHAN,flout);
 	}
@@ -1019,15 +941,7 @@ int main (int argc, char *argv[]) {
 	  }
 	}
 	if (philwriting) {
-
-	  if (delaying) {
-	    delayer<<<NBASE*NCHAN*4/32, 32>>>(d_finalout, d_freqs, d_delays);
-	    //printf("Applying baseline delays before writing philterbank\n");
-	  }
-	    
-	  cudaDeviceSynchronize();
 	  reduce_corrs<<<NCHAN,1024>>>(d_finalout, d_filout, 4., d_a1, d_a2, stokes, d_antpos, minBase);
-	  cudaDeviceSynchronize();
 	  cudaMemcpy(filout, d_filout, NCHAN*sizeof(float), cudaMemcpyDeviceToHost);	  
 	  fwrite(filout,sizeof(float),NCHAN,flout);
 	}
@@ -1073,6 +987,5 @@ int main (int argc, char *argv[]) {
   free(filnam);
   free(delnam);
   free(h_delays);
-  free(h_bants);
 
 }
