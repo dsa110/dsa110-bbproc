@@ -295,7 +295,17 @@ struct WeightOpts {
     bool swap_pol = false;
     std::vector<bool> use;  // per antenna, post core/flag cuts
     double l = 0.0, m = 0.0;
+    // F21 DEC fringe-stop (dsa110-rt dsart/cal/cal_loader.py): the
+    // realtime fast-vis path folds
+    //   exp(-2*pi*i * f * sin(dec_obs - LAT_OVRO) * N_a / c)
+    // into the cal before imaging; the imager's (l, m) frame is
+    // defined AFTER this fold. Without it a 2D (both-arm) beamform is
+    // fully decorrelated (260715twmx incident, 2026-07-15). NAN =
+    // not provided (fold skipped, warning printed).
+    double dec_obs_rad = NAN;
 };
+
+constexpr double LAT_OVRO_RAD = 0.6498558936875687;  // 37.234 deg (dsart)
 
 // Fill w[NANT][NPOL][NCHAN_SB][2] = conj(cal gain applied) * conj(phasor).
 // Excluded antennas/pols get exact zeros (kernel skip).
@@ -311,12 +321,18 @@ static void build_bf_weights(const WeightOpts &o, int sb,
         bool ant_counted = false;
         const double E = o.have_cal ? o.cal.antpos_e[a] : 0.0;
         const double N = o.have_cal ? o.cal.antpos_n[a] : 0.0;
+        const double sin_dec =
+            std::isnan(o.dec_obs_rad)
+                ? 0.0 : sin(o.dec_obs_rad - LAT_OVRO_RAD);
         for (int ch = 0; ch < NCHAN_SB; ch++) {
             const double f_hz = freq_mhz(sb, ch) * 1e6;
             // dsa110-rt injection convention: source at (l,m) appears with
             // e^{+2 pi i nu (E l + N m + U n)/c}; beamform with conjugate.
+            // Plus the F21 DEC fringe-stop exp(-2 pi i f sin(dec-lat) N/c)
+            // (folded into the same rotation; see WeightOpts.dec_obs_rad).
             const double geo =
-                2.0 * M_PI * f_hz * (E * o.l + N * o.m + 0.0 * n_term) / CVAC;
+                2.0 * M_PI * f_hz *
+                (E * o.l + N * o.m + 0.0 * n_term + sin_dec * N) / CVAC;
             const double pr = cos(geo), pi = -sin(geo);  // conj(phasor)
             for (int p = 0; p < NPOL; p++) {
                 double gr = 1.0, gi = 0.0;
@@ -326,11 +342,16 @@ static void build_bf_weights(const WeightOpts &o, int sb,
                     gi = o.cal.gains[a][ch / FINE_PER_COARSE][cp][1];
                     const double g2 = gr * gr + gi * gi;
                     if (g2 == 0.0) continue;  // cal-flagged antenna/pol
+                    // The blob stores BEAMFORMING WEIGHTS, applied
+                    // UNCONJUGATED (legacy beamformer_ns.c init_weights
+                    // normalizes w/|w| and beamformer() does w*v; same
+                    // in dsaX_bfCorr). Treating them as gains and
+                    // applying conj(g) DOUBLES each antenna's phase
+                    // error -> full decorrelation (260715twmx incident,
+                    // 2026-07-15).
                     const double den = o.phase_only ? sqrt(g2) : g2;
-                    // conj(g)/den
-                    const double tr = gr / den, ti = -gi / den;
-                    gr = tr;
-                    gi = ti;
+                    gr = gr / den;
+                    gi = gi / den;
                 }
                 const size_t idx = (((size_t)a * NPOL + p) * NCHAN_SB + ch) * 2;
                 w[idx] = (float)(gr * pr - gi * pi);
@@ -354,6 +375,7 @@ struct FilOpts {
     std::string single_frag;  // -i: single-fragment mode
     int single_sb = -1;
     double l = 0.0, m = 0.0;
+    double dec_deg = NAN;          // observing (pointing) declination
     int tscrunch = 8;
     double dm = 0.0;
     int stokes = 0;
@@ -398,6 +420,15 @@ static int run_filterbank(const FilOpts &opt) {
     wo.m = opt.m;
     wo.phase_only = opt.phase_only;
     wo.swap_pol = opt.swap_pol;
+    if (!std::isnan(opt.dec_deg)) {
+        wo.dec_obs_rad = opt.dec_deg * M_PI / 180.0;
+        printf("F21 DEC fringe-stop: dec_obs=%.6f deg (sin(dec-lat)=%.6f)\n",
+               opt.dec_deg, sin(wo.dec_obs_rad - LAT_OVRO_RAD));
+    } else {
+        printf("WARNING: no --dec-deg: F21 DEC fringe-stop DISABLED — a\n"
+               "  2D (both-arm) coherent sum will be decorrelated unless\n"
+               "  the data were pre-fringe-stopped.\n");
+    }
     wo.use.assign(NANT, false);
     if (opt.core_path == "all") {
         for (int a = 0; a < NANT; a++) wo.use[a] = true;
@@ -763,9 +794,11 @@ static int run_visibilities(const VisOpts &opt) {
                     double gi = cal.gains[a][c][cp][1];
                     const double g2 = gr * gr + gi * gi;
                     if (g2 > 0.0) {
+                        // unconjugated, matching legacy toolkit_dev
+                        // init_weights (w /= |w|^2 then w*v).
                         const double den = opt.phase_only ? sqrt(g2) : g2;
                         gr = gr / den;
-                        gi = -gi / den;  // conj, matching legacy w = g*/|g|^2
+                        gi = gi / den;
                     }
                     wl[((size_t)a * NCAL_COARSE + c) * NPOL * 2 + p * 2] =
                         (float)gr;
@@ -943,6 +976,8 @@ static void usage() {
         "  -P <out.fil>      write full-band SIGPROC filterbank (float32)\n"
         "  --l <rad>         l offset from meridian phase centre [0]\n"
         "  --m <rad>         m offset [0]\n"
+        "  --dec-deg <deg>   observing (pointing) declination — enables the\n"
+        "                    F21 DEC fringe-stop (REQUIRED for coherence)\n"
         "  -w <cal.dat>      beamformer_weights_*.dat cal blob\n"
         "  --phase-only      normalize cal gains to unit magnitude\n"
         "  --swap-pol        swap cal pol axis vs voltage pol axis\n"
@@ -978,9 +1013,10 @@ int main(int argc, char *argv[]) {
 
     enum { OPT_L = 1000, OPT_M, OPT_CORE, OPT_TSCR, OPT_DM, OPT_STOKES,
            OPT_RFI, OPT_RFIM, OPT_MJD, OPT_GPU, OPT_PHONLY, OPT_SWAP,
-           OPT_SB, OPT_TELID };
+           OPT_SB, OPT_TELID, OPT_DEC };
     static struct option lopts[] = {
         {"l", required_argument, nullptr, OPT_L},
+        {"dec-deg", required_argument, nullptr, OPT_DEC},
         {"m", required_argument, nullptr, OPT_M},
         {"core", required_argument, nullptr, OPT_CORE},
         {"tscrunch", required_argument, nullptr, OPT_TSCR},
@@ -1017,6 +1053,7 @@ int main(int argc, char *argv[]) {
             case 's': vo.npkts = atoll(optarg); break;
             case 'q': vo.offpkts = atoll(optarg); break;
             case OPT_L: fo.l = atof(optarg); break;
+            case OPT_DEC: fo.dec_deg = atof(optarg); break;
             case OPT_M: fo.m = atof(optarg); break;
             case OPT_CORE: fo.core_path = optarg; break;
             case OPT_TSCR: fo.tscrunch = atoi(optarg); break;

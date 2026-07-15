@@ -112,6 +112,8 @@ static void usage() {
         "  -w <cal.dat>    cal blob: antpos for the phasor + gains folded\n"
         "                  into the signal (omit: antpos=0, unit gains)\n"
         "  --mjd <mjd>     manifest mjd_target [60000.0]\n"
+        "  --dec-deg <deg> imprint the F21 dec fringe (meridian source at\n"
+        "                  this pointing dec); recover with toolkit --dec-deg\n"
         "  --sb <a>-<b>    subband range [0-15]\n"
         "  --seed <n>      RNG seed [12345]\n"
         "  --gpu <n>       [0]\n");
@@ -121,11 +123,11 @@ int main(int argc, char *argv[]) {
     std::string outdir = ".", event = "fake0000test", cal_path;
     int nblocks = 4, width = 16, gpu = 0, sb_lo = 0, sb_hi = NSB - 1;
     double l = 0.0, m = 0.0, dm = 100.0, amp = 1.0, t0 = 0.5, noise = 1.33;
-    double mjd = 60000.0;
+    double mjd = 60000.0, dec_deg = NAN;
     unsigned long long seed = 12345;
 
     enum { OPT_NB = 1000, OPT_L, OPT_M, OPT_DM, OPT_W, OPT_AMP, OPT_T0,
-           OPT_NOISE, OPT_MJD, OPT_SB, OPT_SEED, OPT_GPU };
+           OPT_NOISE, OPT_MJD, OPT_SB, OPT_SEED, OPT_GPU, OPT_DEC };
     static struct option lopts[] = {
         {"nblocks", required_argument, nullptr, OPT_NB},
         {"l", required_argument, nullptr, OPT_L},
@@ -136,6 +138,7 @@ int main(int argc, char *argv[]) {
         {"t0", required_argument, nullptr, OPT_T0},
         {"noise", required_argument, nullptr, OPT_NOISE},
         {"mjd", required_argument, nullptr, OPT_MJD},
+        {"dec-deg", required_argument, nullptr, OPT_DEC},
         {"sb", required_argument, nullptr, OPT_SB},
         {"seed", required_argument, nullptr, OPT_SEED},
         {"gpu", required_argument, nullptr, OPT_GPU},
@@ -156,6 +159,7 @@ int main(int argc, char *argv[]) {
             case OPT_T0: t0 = atof(optarg); break;
             case OPT_NOISE: noise = atof(optarg); break;
             case OPT_MJD: mjd = atof(optarg); break;
+            case OPT_DEC: dec_deg = atof(optarg); break;
             case OPT_SB: sscanf(optarg, "%d-%d", &sb_lo, &sb_hi); break;
             case OPT_SEED: seed = strtoull(optarg, nullptr, 10); break;
             case OPT_GPU: gpu = atoi(optarg); break;
@@ -180,6 +184,13 @@ int main(int argc, char *argv[]) {
     }
 
     const double ftop_ghz = freq_mhz(0, 0) * 1e-3;
+    constexpr double LAT_OVRO_RAD = 0.6498558936875687;
+    const double sin_dec_lat =
+        std::isnan(dec_deg) ? 0.0
+                            : sin(dec_deg * M_PI / 180.0 - LAT_OVRO_RAD);
+    if (!std::isnan(dec_deg))
+        printf("dec fringe: dec=%.4f deg sin(dec-lat)=%.6f\n",
+               dec_deg, sin_dec_lat);
     printf("event %s: %d blocks/frag, DM %.2f, width %d, amp %.2f, "
            "(l,m)=(%.6g,%.6g), t0 %.3f s, sb %d..%d\n",
            event.c_str(), nblocks, dm, width, amp, l, m, t0, sb_lo, sb_hi);
@@ -202,17 +213,32 @@ int main(int argc, char *argv[]) {
             const double N = have_cal ? cal.antpos_n[a] : 0.0;
             for (int ch = 0; ch < NCHAN_SB; ch++) {
                 const double f_hz = freq_mhz(sb, ch) * 1e6;
+                // A raw-voltage source at (l, m) off the dec-stopped
+                // meridian carries: the (l,m) phasor (+ sign, SNAP
+                // convention), PLUS the dec fringe
+                // e^{-2 pi i f sin(dec-lat) N/c} (dsart cal_loader),
+                // PLUS conj(cal weight) — the toolkit multiplies the
+                // blob in unconjugated, so v must carry its conjugate
+                // for the product to come out flat. Getting all three
+                // right here is what lets tests/roundtrip.sh catch
+                // convention bugs (260715twmx incident).
+                // sign pinned EMPIRICALLY by 260715twmx: the toolkit
+                // weight e^{-2 pi i f (El+Nm+sinD*N)/c} recovers the
+                // real FRB, so raw voltages carry the + sign of all
+                // three terms.
                 const double geo =
-                    2.0 * M_PI * f_hz * (E * l + N * m) / CVAC;
+                    2.0 * M_PI * f_hz *
+                    (E * l + N * m + sin_dec_lat * N) / CVAC;
                 double sr = amp * cos(geo), si = amp * sin(geo);  // +i geo
                 if (have_cal) {
-                    // fold pol-B gain into both pols (test simplification;
-                    // per-pol gains only matter for Q/U/V fidelity)
+                    // conj(pol-B weight) into both pols (test
+                    // simplification; per-pol only matters for QUV)
                     const double gr = cal.gains[a][ch / FINE_PER_COARSE][0][0];
-                    const double gi = cal.gains[a][ch / FINE_PER_COARSE][0][1];
-                    if (gr != 0.0 || gi != 0.0) {
-                        const double tr = sr * gr - si * gi;
-                        si = sr * gi + si * gr;
+                    const double gi = -cal.gains[a][ch / FINE_PER_COARSE][0][1];
+                    const double g2 = gr * gr + gi * gi;
+                    if (g2 > 0.0) {
+                        const double tr = (sr * gr - si * gi) / sqrt(g2);
+                        si = (sr * gi + si * gr) / sqrt(g2);
                         sr = tr;
                     }
                 }

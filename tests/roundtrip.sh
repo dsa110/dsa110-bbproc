@@ -10,6 +10,7 @@ EVT=fake0000test
 L=0.002
 M=-0.001
 DM=300
+DEC=16.27          # exercises the F21 dec fringe-stop (260715twmx bug)
 NBLOCKS=4          # 4 blocks = 0.54 s per fragment; 4 subbands below
 SBRANGE=0-3        # subband subset keeps the test < 5 GB / < 1 min
 
@@ -23,38 +24,46 @@ echo "== faking event (subbands $SBRANGE, $NBLOCKS blocks) =="
 # Synthetic antpos: the faker used antpos=0 (no cal blob), so the (l,m)
 # phasor was unity — beamforming ON and OFF position would be identical.
 # For a real geometric test we need a cal blob. Build a synthetic one:
-# unit gains, antennas on a 60 m-spaced E-W line + N scatter.
+# RANDOM-phase gains (unit gains are self-conjugate and let cal-
+# conjugation bugs through — the 260715twmx lesson), antennas on a
+# 60 m-spaced E-W line + N scatter.
 python3 - "$SCRATCH/synth_cal.dat" <<'EOF'
-import struct, sys
+import math, random, struct, sys
 NANT, NC = 96, 48
+rng = random.Random(4242)
 with open(sys.argv[1], "wb") as f:
     for a in range(NANT):                     # antpos_e
         f.write(struct.pack("<f", (a - NANT/2) * 60.0))
     for a in range(NANT):                     # antpos_n
         f.write(struct.pack("<f", ((a * 37) % 29 - 14) * 25.0))
-    for a in range(NANT):                     # unit gains
+    for a in range(NANT):                     # random-phase unit-|g| gains
         for c in range(NC):
+            # same phase for both pols: the faker folds the pol-B
+            # weight into both pol signals (documented simplification)
+            ph = rng.uniform(-math.pi, math.pi)
             for p in range(2):
-                f.write(struct.pack("<ff", 1.0, 0.0))
+                f.write(struct.pack("<ff", math.cos(ph), math.sin(ph)))
 EOF
 
 echo "== re-faking with geometry =="
 ./fake_voltages -O "$SCRATCH" -E $EVT --nblocks $NBLOCKS --sb $SBRANGE \
     --l $L --m $M --dm $DM --width 16 --amp 1.2 --t0 0.15 \
-    -w "$SCRATCH/synth_cal.dat" --gpu $GPU
+    -w "$SCRATCH/synth_cal.dat" --dec-deg $DEC --gpu $GPU
 
 echo "== beamform ON position =="
 ./toolkit -D "$SCRATCH" -E $EVT -P "$SCRATCH/on.fil" --l $L --m $M \
-    -w "$SCRATCH/synth_cal.dat" --core all --tscrunch 4 --gpu $GPU
+    --dec-deg $DEC -w "$SCRATCH/synth_cal.dat" --core all --tscrunch 4 \
+    --gpu $GPU
 
 echo "== beamform OFF position =="
 ./toolkit -D "$SCRATCH" -E $EVT -P "$SCRATCH/off.fil" --l 0 --m 0 \
-    -w "$SCRATCH/synth_cal.dat" --core all --tscrunch 4 --gpu $GPU
+    --dec-deg $DEC -w "$SCRATCH/synth_cal.dat" --core all --tscrunch 4 \
+    --gpu $GPU
 
 echo "== beamform ON + dedispersion + RFI flagging =="
 ./toolkit -D "$SCRATCH" -E $EVT -P "$SCRATCH/on_dm.fil" --l $L --m $M \
-    -w "$SCRATCH/synth_cal.dat" --core all --tscrunch 4 --dm $DM --rfi \
-    --gpu $GPU
+    --dec-deg $DEC -w "$SCRATCH/synth_cal.dat" --core all --tscrunch 4 \
+    --dm $DM --rfi --gpu $GPU
 
 echo "== verifying =="
 python3 - "$SCRATCH/on.fil" "$SCRATCH/off.fil" "$SCRATCH/on_dm.fil" <<'EOF'
