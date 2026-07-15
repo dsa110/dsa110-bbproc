@@ -1,34 +1,23 @@
-beamformer: beamformer.c
-	gcc -o $@ $^ -I/usr/local/include -L/usr/local/lib -lm -g -O2 -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran
+# dsa110-bbproc — offline M8 voltage-dump processing
+# Builds on h23 (2x RTX 2080 Ti, sm_75, CUDA 11.1).
 
-beamformer_volts: beamformer_volts.c
-	gcc -o $@ $^ -I/usr/local/include -L/usr/local/lib -lm -g -O2 -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran
+NVCC     ?= /usr/local/cuda/bin/nvcc
+ARCH     ?= sm_75
+NVFLAGS  = -arch=$(ARCH) -O3 -std=c++14 -Xcompiler="-Wall -pthread" \
+           -I src -L/usr/local/cuda/lib64 -lcudart -lm
 
-dsacorr: dsacorr.c
-	gcc -o $@ $^ -I/usr/local/include -L/usr/local/lib -lm -g -O2 -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran
+all: toolkit fake_voltages
 
-dsacorr_little: dsacorr_little.c
-	gcc -o $@ $^ -I/usr/local/include -L/usr/local/lib -lm -g -O2 -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran
+toolkit: src/toolkit.cu src/bbproc.h
+	$(NVCC) $(NVFLAGS) -o $@ src/toolkit.cu
 
-rotate_file: rotate_file.c
-	gcc -o $@ $^ -I/usr/local/include -L/usr/local/lib -lm -g -O2 -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran
+fake_voltages: src/fake_voltages.cu src/bbproc.h
+	$(NVCC) $(NVFLAGS) -o $@ src/fake_voltages.cu
 
-extract_antennas: extract_antennas.c
-	gcc -o $@ $^ -g -O3 -Wall -pthread -march=native -I/usr/local/include -I/usr/local/include/src -I/usr/local/cfitsio-3.47/include/ -L/usr/local/lib -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran -lm  -lsigproc
+.PHONY: all clean test
 
-single_baseline: single_baseline.c
-	gcc -o $@ $^ -g -O3 -Wall -pthread -march=native -I/usr/local/include -I/usr/local/include/src -I/usr/local/cfitsio-3.47/include/ -L/usr/local/lib -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran -lm  -lsigproc
-
-toolkit: toolkit.cu
-	/usr/local/cuda/bin/nvcc -D CUDA -ccbin=g++ -o $@ $^ -I/usr/local/include -I/usr/local/include/src -I/usr/local/cfitsio-3.47/include -arch=sm_75 -O3 -Xcompiler="-pthread" -DMATRIX_ORDER_TRIANGULAR -std=c++14 -L/usr/local/lib -lpsrdada -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran -L/usr/local/cuda/lib64 -lcudart -lm -L/usr/local/cfitsio-3.47/lib -lcfitsio
-
-toolkit_dev: toolkit_dev.cu
-	/usr/local/cuda/bin/nvcc -D CUDA -ccbin=g++ -o $@ $^ -I/usr/local/include -I/usr/local/include/src -I/usr/local/cfitsio-3.47/include -arch=sm_75 -O3 -Xcompiler="-pthread" -DMATRIX_ORDER_TRIANGULAR -std=c++14 -L/usr/local/lib -lpsrdada -L/usr/lib/gcc/x86_64-linux-gnu/5 -lgfortran -L/usr/local/cuda/lib64 -lcudart -lm -L/usr/local/cfitsio-3.47/lib -lcfitsio
-
-.PHONY: clean all
+test: toolkit fake_voltages
+	bash tests/roundtrip.sh
 
 clean:
-	rm -f toolkit_dev toolkit single_baseline extract_antennas rotate_file dsacorr dsacorr_little beamformer
-
-all: toolkit_dev toolkit single_baseline extract_antennas rotate_file dsacorr dsacorr_little beamformer
-
+	rm -f toolkit fake_voltages

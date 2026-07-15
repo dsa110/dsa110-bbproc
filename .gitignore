@@ -1,10 +1,12 @@
-toolkit_dev
+# build artifacts
 toolkit
-beamformer
-beamformer_incoh
-dsacorr
-dsacorr_little
-extract_antennas
-rotate_file
-single_baseline
-single_baseline_working
+fake_voltages
+*.o
+*.out
+*.fil
+*.vis
+# editor / python leftovers
+*~
+*.bak
+__pycache__/
+*.pyc

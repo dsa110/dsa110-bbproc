@@ -1,0 +1,94 @@
+# DSA-110 core antennas, by VOLTAGE INDEX (0-95) — the antenna axis of
+# the M8 voltage fragments and the cal blob.
+#
+# Definition (canonical, same as the dsa110-rt pipeline; see
+# dsart/grid/sparsity_pattern.py "Core/outrigger discrimination"):
+# station number <= 102 is core; stations 103-116 are the 14 outriggers.
+# Generated 2026-07-15 from etcd /cnf/corr antenna_order on h23:
+# outrigger voltage indices = 48, 83-95. Regenerate with:
+#   python -c "from dsautils.dsa_store import DsaStore; \
+#     ao=DsaStore().get_dict('/cnf/corr')['antenna_order']; \
+#     print('\n'.join(str(i) for i,s in sorted((int(k),int(v)) \
+#       for k,v in ao.items()) if s<=102))"
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
