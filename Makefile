@@ -3,7 +3,7 @@
 
 NVCC     ?= /usr/local/cuda/bin/nvcc
 ARCH     ?= sm_75
-NVFLAGS  = -arch=$(ARCH) -O3 -std=c++14 -Xcompiler="-Wall -pthread" \
+NVFLAGS  = -arch=$(ARCH) -O3 -std=c++14 -Xcompiler="-Wall -pthread -fopenmp" \
            -I src -L/usr/local/cuda/lib64 -lcudart -lm
 
 all: toolkit fake_voltages

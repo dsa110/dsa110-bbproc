@@ -288,6 +288,10 @@ __global__ void k_reduce(const float *__restrict__ in, float *__restrict__ out,
 // Host: weights
 // ---------------------------------------------------------------------------
 
+static std::vector<unsigned char> load_dedispersed(
+        const std::string &path, long long tot_pkts, double dm,
+        double fch1_mhz);
+
 struct WeightOpts {
     bool have_cal = false;
     CalBlob cal;
@@ -376,6 +380,11 @@ struct FilOpts {
     int single_sb = -1;
     double l = 0.0, m = 0.0;
     double dec_deg = NAN;          // observing (pointing) declination
+    // -m: legacy pre-correlation intra-channel dedispersion applied to
+    // the raw voltages of each subband before beamforming (65.536 us
+    // shifts, ref 1530 MHz). Distinct from --dm, which shifts the
+    // DETECTED filterbank post-hoc. 0 = off.
+    double dm_pre = 0.0;
     int tscrunch = 8;
     double dm = 0.0;
     int stokes = 0;
@@ -598,13 +607,29 @@ static int run_filterbank(const FilOpts &opt) {
         CUDA_CHECK(cudaMemcpy(d_w, w.data(), w.size() * 4,
                               cudaMemcpyHostToDevice));
 
-        FILE *f = fopen(frags[sb].c_str(), "rb");
-        if (!f) continue;
+        // -m: dedisperse this subband's raw voltages in host RAM first
+        std::vector<unsigned char> ddbuf;
+        if (opt.dm_pre > 0.0) {
+            const long long sb_pkts =
+                fsizes[sb] / ((long long)NANT * NCHAN_SB * 4);
+            ddbuf = load_dedispersed(frags[sb], sb_pkts, opt.dm_pre,
+                                     freq_mhz(sb, 0));
+        }
+        FILE *f = opt.dm_pre > 0.0 ? nullptr
+                                   : fopen(frags[sb].c_str(), "rb");
+        if (!f && opt.dm_pre <= 0.0) continue;
         const int nb = (int)(fsizes[sb] / BLOCK_BYTES);
         for (int b = 0; b < nb; b++) {
-            if (fread(h_block, 1, BLOCK_BYTES, f) != (size_t)BLOCK_BYTES) {
-                fprintf(stderr, "short read %s block %d\n", frags[sb].c_str(), b);
-                break;
+            if (f) {
+                if (fread(h_block, 1, BLOCK_BYTES, f)
+                        != (size_t)BLOCK_BYTES) {
+                    fprintf(stderr, "short read %s block %d\n",
+                            frags[sb].c_str(), b);
+                    break;
+                }
+            } else {
+                memcpy(h_block, ddbuf.data() + (size_t)b * BLOCK_BYTES,
+                       BLOCK_BYTES);
             }
             CUDA_CHECK(cudaMemcpy(d_raw, h_block, BLOCK_BYTES,
                                   cudaMemcpyHostToDevice));
@@ -680,7 +705,7 @@ static int run_filterbank(const FilOpts &opt) {
                 memcpy(dst, &h_pow[(size_t)t * NCHAN_SB], NCHAN_SB * 4);
             }
         }
-        fclose(f);
+        if (f) fclose(f);
         printf("subband %02d done (%s)\n", sb, frags[sb].c_str());
     }
 
@@ -757,6 +782,13 @@ static int run_filterbank(const FilOpts &opt) {
 struct VisOpts {
     std::string in_frag, out_vis, out_fil, cal_path, flag_path, delay_path;
     int tint = 8;
+    // Pre-correlation intra-channel dedispersion (legacy toolkit_dev -m):
+    // shift each channel EARLIER by round(4.15*DM*(f^-2 - 1.53^-2)/0.065536)
+    // packets (65.536 us), reference 1530 MHz. 0 = off.
+    double dm = 0.0;
+    // Explicit first-channel frequency (MHz) override (legacy -c). NAN =
+    // infer the subband from the filename (M8 band plan).
+    double fch1_mhz = NAN;
     bool averaging = false;
     int stokes = 0;
     float min_base = -1.f;
@@ -764,6 +796,55 @@ struct VisOpts {
     bool phase_only = false, swap_pol = false;
     int gpu = 0;
 };
+
+// Load a fragment fully and apply legacy pre-correlation dedispersion:
+// out[pkt][ant][ch] = in[pkt + dms[ch]][ant][ch] (4 bytes per cell),
+// zero-filled where the source runs past EOF (the legacy kernel wrapped
+// early samples to the buffer end instead — deliberate improvement:
+// the wrapped region was garbage-by-construction).
+static std::vector<unsigned char> load_dedispersed(
+        const std::string &path, long long tot_pkts, double dm,
+        double fch1_mhz) {
+    const size_t pkt_bytes = (size_t)NANT * NCHAN_SB * 4;
+    std::vector<unsigned char> in((size_t)tot_pkts * pkt_bytes);
+    FILE *f = fopen(path.c_str(), "rb");
+    if (!f || fread(in.data(), 1, in.size(), f) != in.size()) {
+        fprintf(stderr, "read failed: %s\n", path.c_str());
+        if (f) fclose(f);
+        exit(1);
+    }
+    fclose(f);
+    // legacy toolkit_dev DM table: 65.536 us packet units, ref 1.53 GHz,
+    // channel freqs descending from fch1.
+    std::vector<int> dms(NCHAN_SB);
+    int max_shift = 0;
+    for (int ch = 0; ch < NCHAN_SB; ch++) {
+        const double f_ghz = (fch1_mhz - ch * DF_MHZ) * 1e-3;
+        dms[ch] = (int)llround(
+            4.15 * dm * (pow(f_ghz, -2.0) - pow(1.53, -2.0)) / 0.065536);
+        if (dms[ch] > max_shift) max_shift = dms[ch];
+    }
+    printf("pre-correlation dedispersion: DM=%.3f ref 1530 MHz, shifts "
+           "%d..%d pkts (%.3f s max)\n", dm, dms[0], dms[NCHAN_SB - 1],
+           max_shift * 65.536e-6);
+    std::vector<unsigned char> out((size_t)tot_pkts * pkt_bytes, 0);
+    #pragma omp parallel for schedule(static)
+    for (long long p = 0; p < tot_pkts; p++) {
+        for (int a = 0; a < NANT; a++) {
+            const size_t obase = (size_t)p * pkt_bytes + (size_t)a * NCHAN_SB * 4;
+            for (int ch = 0; ch < NCHAN_SB; ch++) {
+                const long long ps = p + dms[ch];
+                if (ps >= tot_pkts) continue;          // zero-filled
+                const size_t ibase =
+                    (size_t)ps * pkt_bytes + (size_t)a * NCHAN_SB * 4;
+                memcpy(&out[obase + (size_t)ch * 4],
+                       &in[ibase + (size_t)ch * 4], 4);
+            }
+        }
+    }
+    return out;
+}
+
 
 static int run_visibilities(const VisOpts &opt) {
     CUDA_CHECK(cudaSetDevice(opt.gpu));
@@ -833,7 +914,13 @@ static int run_visibilities(const VisOpts &opt) {
         }
     std::vector<float> freqs(NCHAN_SB);
     const int sb = std::max(0, infer_sb_from_name(opt.in_frag));
-    for (int c = 0; c < NCHAN_SB; c++) freqs[c] = (float)(freq_mhz(sb, c) * 1e6);
+    const double fch1 =
+        std::isnan(opt.fch1_mhz) ? freq_mhz(sb, 0) : opt.fch1_mhz;
+    if (!std::isnan(opt.fch1_mhz))
+        printf("fch1 override: %.6f MHz (subband inference bypassed)\n",
+               fch1);
+    for (int c = 0; c < NCHAN_SB; c++)
+        freqs[c] = (float)((fch1 - c * DF_MHZ) * 1e6);
 
     std::vector<float> delays(NBASE, 0.f);
     const bool delaying = !opt.delay_path.empty();
@@ -877,7 +964,13 @@ static int run_visibilities(const VisOpts &opt) {
     CUDA_CHECK(cudaMemcpy(d_a1, a1.data(), NBASE * 4, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_a2, a2.data(), NBASE * 4, cudaMemcpyHostToDevice));
 
-    FILE *fin = fopen(opt.in_frag.c_str(), "rb");
+    // -m: dedisperse the whole fragment in host RAM first; the read
+    // loop then consumes the shifted buffer instead of the file.
+    std::vector<unsigned char> dedispersed;
+    if (opt.dm > 0.0)
+        dedispersed = load_dedispersed(opt.in_frag, tot_pkts, opt.dm, fch1);
+
+    FILE *fin = opt.dm > 0.0 ? nullptr : fopen(opt.in_frag.c_str(), "rb");
     FILE *fout = opt.out_vis.empty() ? nullptr
                                      : fopen(opt.out_vis.c_str(), "wb");
     FILE *ffil = opt.out_fil.empty() ? nullptr
@@ -890,7 +983,8 @@ static int run_visibilities(const VisOpts &opt) {
     const size_t pkt_bytes = (size_t)NANT * NCHAN_SB * 4;
 
     // seek to offset
-    fseek(fin, opt.offpkts * pkt_bytes, SEEK_SET);
+    if (fin) fseek(fin, opt.offpkts * pkt_bytes, SEEK_SET);
+    long long mem_pos = opt.offpkts;      // read cursor into `dedispersed`
 
     auto flush_vis = [&](float *d_buf, float scf) {
         if (delaying)
@@ -924,8 +1018,20 @@ static int run_visibilities(const VisOpts &opt) {
     while (done < npkts) {
         const long long chunk_pkts =
             std::min((long long)PKT_PER_BLOCK, npkts - done);
-        const size_t nread =
-            fread(h_block, 1, chunk_pkts * pkt_bytes, fin);
+        size_t nread;
+        if (fin) {
+            nread = fread(h_block, 1, chunk_pkts * pkt_bytes, fin);
+        } else {
+            const long long avail =
+                std::max(0LL, tot_pkts - mem_pos);
+            const long long take = std::min(chunk_pkts, avail);
+            nread = (size_t)take * pkt_bytes;
+            if (take > 0)
+                memcpy(h_block,
+                       dedispersed.data() + (size_t)mem_pos * pkt_bytes,
+                       nread);
+            mem_pos += take;
+        }
         if (nread < pkt_bytes) break;
         const long long got = nread / pkt_bytes;
         CUDA_CHECK(cudaMemcpy(d_raw, h_block, got * pkt_bytes,
@@ -954,7 +1060,7 @@ static int run_visibilities(const VisOpts &opt) {
         done += got;
     }
     CUDA_CHECK(cudaDeviceSynchronize());
-    fclose(fin);
+    if (fin) fclose(fin);
     if (fout) fclose(fout);
     if (ffil) fclose(ffil);
     printf("visibilities done: %lld packets\n", done);
@@ -1001,6 +1107,11 @@ static void usage() {
         "  -g <n>            its Stokes [0]\n"
         "  -v <m>            min E-W baseline length [none]\n"
         "  -s <n> -q <n>     packet count / offset\n"
+        "  -c <MHz>          first-channel frequency override (else from\n"
+        "                    the _sbNN filename + M8 band plan)\n"
+        "  -m <pc/cc>        pre-correlation intra-channel dedispersion\n"
+        "                    (legacy toolkit_dev: 65.536 us shifts,\n"
+        "                    ref 1530 MHz)\n"
         "\n"
         "Common:  --gpu <n> [0]   -h help\n");
 }
@@ -1034,7 +1145,7 @@ int main(int argc, char *argv[]) {
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "D:E:i:P:w:f:o:t:d:ap:g:v:s:q:h",
+    while ((c = getopt_long(argc, argv, "D:E:i:P:w:f:o:t:d:ap:g:v:s:q:c:m:h",
                             lopts, nullptr)) != -1) {
         switch (c) {
             case 'D': fo.event_dir = optarg; break;
@@ -1050,6 +1161,8 @@ int main(int argc, char *argv[]) {
             case 'p': vo.out_fil = optarg; want_vis = true; break;
             case 'g': vo.stokes = atoi(optarg); break;
             case 'v': vo.min_base = atof(optarg); break;
+            case 'c': vo.fch1_mhz = atof(optarg); break;
+            case 'm': vo.dm = atof(optarg); fo.dm_pre = atof(optarg); break;
             case 's': vo.npkts = atoll(optarg); break;
             case 'q': vo.offpkts = atoll(optarg); break;
             case OPT_L: fo.l = atof(optarg); break;
