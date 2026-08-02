@@ -31,6 +31,7 @@
 #include <getopt.h>
 #include <unistd.h>
 
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -98,19 +99,153 @@ __global__ void k_autos(const unsigned char *__restrict__ raw,
     }
 }
 
+// ---------------------------------------------------------------------------
+// SK mask + per-cell renormalization
+//
+// 2026-08-02 rewrite. The first version rolled the per-channel SK trips up
+// into a (win, ant, pol) verdict ("kill the antenna for this 8.4 ms window
+// if >1% of its 384 channels trip") and renormalized the beam VOLTAGE by
+// n_used / n_live. Both were wrong, and together they made --rfi worse than
+// no flagging at all:
+//
+//   * the (ant, pol) rollup threw away 380 good channels to excise 4 bad
+//     ones. The realtime path it claims to mirror flags per (ant, ch, pol)
+//     — dsart/rfi/combine.py ORs the detectors into an [NANTS, NCHAN, NPOL]
+//     mask and zero-fills exactly those cells;
+//   * scaling the VOLTAGE by n_ref/n_live holds the coherent signal
+//     amplitude fixed, which means the noise power rides up as
+//     n_ref^2/n_live: every flagged window gets a HIGHER noise floor than
+//     its neighbours, and the windows with the most RFI get boosted the
+//     most. A .fil whose noise is estimated globally then reads those
+//     windows as excursions. The noise-stationary scaling is on the POWER:
+//     |B|^2 * (n_ref/n_live), i.e. voltage * sqrt(n_ref/n_live).
+//   * n_live counted `wo.use[]` (core cut only) while n_ref was
+//     build_bf_weights' `n_used` (which excludes cal-flagged ant/pol), so
+//     even a window with nothing flagged got scaled by ~0.96 in voltage
+//     (0.92 in power, measured on 260802unoj). --rfi must be a no-op where
+//     nothing is flagged.
+//
+// Both counts now come from the weights themselves, per (ch, pol).
+// ---------------------------------------------------------------------------
+
+// Per-(ch, pol) count of antennas with a nonzero beamforming weight — the
+// denominator a fully-unflagged window normalizes to.
+// grid: 1   block: NCHAN_SB threads
+__global__ void k_nref(const float *__restrict__ w,
+                       unsigned short *__restrict__ nref) {
+    const int ch = threadIdx.x;
+    for (int p = 0; p < NPOL; p++) {
+        int n = 0;
+        for (int a = 0; a < NANT; a++) {
+            const size_t i = (((size_t)a * NPOL + p) * NCHAN_SB + ch) * 2;
+            if (w[i] != 0.f || w[i + 1] != 0.f) n++;
+        }
+        nref[(size_t)ch * NPOL + p] = (unsigned short)n;
+    }
+}
+
+// Channel-resolved SK mask.
+// grid: (NANT, nwin)   block: NCHAN_SB threads
+// autos: [nwin][NANT][NCHAN_SB][NPOL][2]  (S1, S2) from k_autos
+// w:     [NANT][NPOL][NCHAN_SB][2]        (a zero weight can't contribute,
+//                                          so we never flag — or count — it)
+// mask:  [nwin][NANT][NCHAN_SB][NPOL] uint8, 1 = excise this cell
+__global__ void k_skmask(const float *__restrict__ autos,
+                         const float *__restrict__ w, int m_win,
+                         float sk_lo, float sk_hi, int pol_lock,
+                         unsigned char *__restrict__ mask,
+                         unsigned long long *__restrict__ counts) {
+    const int ant = blockIdx.x;
+    const int win = blockIdx.y;
+    const int ch = threadIdx.x;
+    const float m_ = (float)m_win;
+    const float c1 = (m_ + 1.f) / (m_ - 1.f);
+
+    unsigned char bad[NPOL];
+    int n_used_here = 0;
+    for (int p = 0; p < NPOL; p++) {
+        const size_t wi = (((size_t)ant * NPOL + p) * NCHAN_SB + ch) * 2;
+        const bool have_w = (w[wi] != 0.f || w[wi + 1] != 0.f);
+        bad[p] = 0;
+        if (!have_w) continue;
+        n_used_here++;
+        const size_t o =
+            ((((size_t)win * NANT + ant) * NCHAN_SB + ch) * NPOL + p) * 2;
+        const float s1 = autos[o], s2 = autos[o + 1];
+        // s1 == 0 means the cell is identically zero (dead input): there is
+        // no SK to compute, and it contributes nothing either way.
+        if (s1 <= 0.f) continue;
+        const float sk = c1 * (m_ * s2 / (s1 * s1) - 1.f);
+        if (sk < sk_lo || sk > sk_hi) bad[p] = 1;
+    }
+    // Cross-hand Stokes (Q/U/V) correlate the two beams, so they must be
+    // formed from the SAME antenna set — otherwise a per-pol mask
+    // decorrelates them. --iquv / --stokes != 0 sets pol_lock.
+    if (pol_lock && (bad[0] || bad[1])) { bad[0] = 1; bad[1] = 1; }
+
+    int n_bad = 0;
+    for (int p = 0; p < NPOL; p++) {
+        mask[(((size_t)win * NANT + ant) * NCHAN_SB + ch) * NPOL + p] = bad[p];
+        if (bad[p]) n_bad++;
+    }
+    if (n_bad) atomicAdd(&counts[0], (unsigned long long)n_bad);
+    if (n_used_here) atomicAdd(&counts[1], (unsigned long long)n_used_here);
+}
+
+// Per-(win, ch, pol) live-antenna count -> power renormalization factor.
+// grid: nwin   block: NCHAN_SB threads
+// scale[win][ch][pol] multiplies the beam VOLTAGE, so it carries the square
+// root of the power correction. norm_mode: 0 = none, 1 = noise-stationary
+// (default), 2 = signal-amplitude-preserving (the old exponent, kept behind
+// --rfi-norm amp for A/B tests).
+__global__ void k_rfiscale(const unsigned char *__restrict__ mask,
+                           const float *__restrict__ w,
+                           const unsigned short *__restrict__ nref,
+                           int norm_mode, float min_live_frac,
+                           float *__restrict__ scale,
+                           unsigned long long *__restrict__ counts) {
+    const int win = blockIdx.x;
+    const int ch = threadIdx.x;
+    for (int p = 0; p < NPOL; p++) {
+        int live = 0;
+        for (int a = 0; a < NANT; a++) {
+            const size_t wi = (((size_t)a * NPOL + p) * NCHAN_SB + ch) * 2;
+            if (w[wi] == 0.f && w[wi + 1] == 0.f) continue;
+            if (mask[(((size_t)win * NANT + a) * NCHAN_SB + ch) * NPOL + p])
+                continue;
+            live++;
+        }
+        const int ref = (int)nref[(size_t)ch * NPOL + p];
+        float s;
+        if (ref <= 0) {
+            s = 0.f;
+        } else if (live <= 0 ||
+                   (float)live < min_live_frac * (float)ref) {
+            // Too little left to reconstruct: boosting it would just
+            // manufacture a noise spike where the RFI was. Blank instead.
+            s = 0.f;
+            atomicAdd(&counts[2], 1ULL);
+        } else if (live == ref || norm_mode == 0) {
+            s = 1.f;
+        } else if (norm_mode == 2) {
+            s = (float)ref / (float)live;            // amplitude-preserving
+        } else {
+            s = sqrtf((float)ref / (float)live);     // noise-stationary
+        }
+        scale[((size_t)win * NCHAN_SB + ch) * NPOL + p] = s;
+    }
+}
+
 // Coherent beamform of one block.
 // grid: T_PER_BLOCK   block: NCHAN_SB threads (one per channel)
-// w:    [NANT][NPOL][NCHAN_SB][2]  conj(cal x phasor) weights, 0 = excluded
-// mask: [nwin][NANT][NPOL] uint8 (1 = flagged) or nullptr
-// norm: [nwin] not needed — normalization folded into host scale per window?
-//       Normalization: per (win) the number of live antennas varies per
-//       (ant,pol) mask; we renormalize by live-antenna count per (win,pol)
-//       computed on host into wnorm[nwin][NPOL].
-// out:  [T_PER_BLOCK][NCHAN_SB] float, the requested Stokes parameter.
+// w:     [NANT][NPOL][NCHAN_SB][2]  conj(cal x phasor) weights, 0 = excluded
+// mask:  [nwin][NANT][NCHAN_SB][NPOL] uint8 (1 = flagged) or nullptr
+// scale: [nwin][NCHAN_SB][NPOL] float voltage renormalization, or nullptr
+// out:   [T_PER_BLOCK][NCHAN_SB] float, the requested Stokes parameter.
 __global__ void k_beamform(const unsigned char *__restrict__ raw,
                            const float *__restrict__ w,
                            const unsigned char *__restrict__ mask,
-                           const float *__restrict__ wnorm, int m_win,
+                           const float *__restrict__ scale, int m_win,
                            int stokes, float *__restrict__ out) {
     const int t = blockIdx.x;
     const int ch = threadIdx.x;
@@ -127,7 +262,9 @@ __global__ void k_beamform(const unsigned char *__restrict__ raw,
             const float wi =
                 w[(((size_t)a * NPOL + p) * NCHAN_SB + ch) * 2 + 1];
             if (wr == 0.f && wi == 0.f) continue;
-            if (mask && mask[((size_t)win * NANT + a) * NPOL + p]) continue;
+            if (mask &&
+                mask[(((size_t)win * NANT + a) * NCHAN_SB + ch) * NPOL + p])
+                continue;
             const unsigned char b = raw[base + p];
             const float re = (float)((char)((b & 0x0F) << 4) >> 4);
             const float im = (float)((char)(b & 0xF0) >> 4);
@@ -135,8 +272,9 @@ __global__ void k_beamform(const unsigned char *__restrict__ raw,
             acci[p] += re * wi + im * wr;
         }
     }
-    const float n0 = wnorm ? wnorm[(size_t)win * NPOL] : 1.f;
-    const float n1 = wnorm ? wnorm[(size_t)win * NPOL + 1] : 1.f;
+    const size_t si = ((size_t)win * NCHAN_SB + ch) * NPOL;
+    const float n0 = scale ? scale[si] : 1.f;
+    const float n1 = scale ? scale[si + 1] : 1.f;
     const float b_r = accr[0] * n0, b_i = acci[0] * n0;
     const float a_r = accr[1] * n1, a_i = acci[1] * n1;
     float v;
@@ -388,8 +526,18 @@ struct FilOpts {
     int tscrunch = 8;
     double dm = 0.0;
     int stokes = 0;
+    bool iquv = false;             // --iquv: write I,Q,U,V in one voltage pass
     bool rfi = false;
     int rfi_m = 256;
+    //: how the surviving antennas are rescaled in a partially-flagged
+    //: (win, ch, pol) cell. "noise" (default) keeps the noise floor
+    //: stationary, which is what a global-noise .fil search wants; "amp"
+    //: keeps the coherent signal amplitude fixed (the pre-2026-08-02
+    //: behaviour) and "none" applies no rescale at all.
+    int rfi_norm = 1;              // 0 none, 1 noise-stationary, 2 amplitude
+    //: blank a cell outright once fewer than this fraction of its
+    //: antennas survive — rescaling that far up only manufactures a spike.
+    double rfi_min_live = 0.25;
     bool phase_only = false, swap_pol = false;
     double mjd_override = -1.0;
     int gpu = 0;
@@ -554,36 +702,54 @@ static int run_filterbank(const FilOpts &opt) {
             return 1;
         }
         nwin = T_PER_BLOCK / opt.rfi_m;
-        printf("RFI: SK per (ant,ch,pol) M=%d FAR=1e-4 -> [%.4f, %.4f]\n",
-               opt.rfi_m, sk_lo, sk_hi);
+        static const char *NORM_NAME[3] = {"none", "noise-stationary",
+                                           "amplitude-preserving"};
+        printf("RFI: SK per (ant,ch,pol) M=%d FAR=1e-4 -> [%.4f, %.4f]; "
+               "norm=%s min-live=%.2f\n",
+               opt.rfi_m, sk_lo, sk_hi, NORM_NAME[opt.rfi_norm],
+               opt.rfi_min_live);
     }
 
     // ---- buffers -----------------------------------------------------------
     unsigned char *h_block, *d_raw;
-    float *d_w, *d_pow, *d_autos = nullptr, *d_wnorm = nullptr;
+    float *d_w, *d_pow, *d_autos = nullptr, *d_scale = nullptr;
     unsigned char *d_mask = nullptr;
+    unsigned short *d_nref = nullptr;
+    unsigned long long *d_counts = nullptr;
     CUDA_CHECK(cudaHostAlloc(&h_block, BLOCK_BYTES, cudaHostAllocDefault));
     CUDA_CHECK(cudaMalloc(&d_raw, BLOCK_BYTES));
     CUDA_CHECK(cudaMalloc(&d_w, (size_t)NANT * NPOL * NCHAN_SB * 2 * 4));
     CUDA_CHECK(cudaMalloc(&d_pow, (size_t)T_PER_BLOCK * NCHAN_SB * 4));
     std::vector<float> h_pow((size_t)T_PER_BLOCK * NCHAN_SB);
-    std::vector<float> h_autos;
-    std::vector<unsigned char> h_mask;
-    std::vector<float> h_wnorm;
     if (opt.rfi) {
-        h_autos.resize((size_t)nwin * NANT * NCHAN_SB * NPOL * 2);
-        h_mask.resize((size_t)nwin * NANT * NPOL);
-        h_wnorm.resize((size_t)nwin * NPOL);
-        CUDA_CHECK(cudaMalloc(&d_autos, h_autos.size() * 4));
-        CUDA_CHECK(cudaMalloc(&d_mask, h_mask.size()));
-        CUDA_CHECK(cudaMalloc(&d_wnorm, h_wnorm.size() * 4));
+        // Everything stays resident on the GPU: the pre-2026-08-02 path
+        // copied the 9.4 MB autos array back per block and ran a 1.2 M-
+        // iteration host loop over (win, ant, pol, ch) to build the mask.
+        // 1.2 MB mask + 48 KB scale + 9.4 MB autos ~ 11 MB of device state.
+        CUDA_CHECK(cudaMalloc(&d_autos,
+                              (size_t)nwin * NANT * NCHAN_SB * NPOL * 2 * 4));
+        CUDA_CHECK(cudaMalloc(&d_mask,
+                              (size_t)nwin * NANT * NCHAN_SB * NPOL));
+        CUDA_CHECK(cudaMalloc(&d_scale, (size_t)nwin * NCHAN_SB * NPOL * 4));
+        CUDA_CHECK(cudaMalloc(&d_nref, (size_t)NCHAN_SB * NPOL * 2));
+        CUDA_CHECK(cudaMalloc(&d_counts, 3 * sizeof(unsigned long long)));
+        CUDA_CHECK(cudaMemset(d_counts, 0, 3 * sizeof(unsigned long long)));
     }
 
-    // full-band accumulation buffer [ntime][nchan_out] (float32).
-    // 23 blocks x 6144 ch = 2.3 GB — fine on h23 host RAM.
-    std::vector<float> full((size_t)ntime * nchan_out, 0.f);
+    // full-band accumulation buffer(s) [ntime][nchan_out] (float32).
+    // 23 blocks x 6144 ch = 2.3 GB each — fine on h23 host RAM. --iquv
+    // keeps four (I,Q,U,V ~ 9.2 GB) so all Stokes come from ONE voltage
+    // pass (the disk read dominates; the extra beamforms are ~free).
+    const std::vector<int> stokes_list =
+        opt.iquv ? std::vector<int>{0, 1, 2, 3}
+                 : std::vector<int>{opt.stokes};
+    static const char *STK[4] = {"I", "Q", "U", "V"};
+    std::vector<std::vector<float>> full(
+        stokes_list.size(),
+        std::vector<float>((size_t)ntime * nchan_out, 0.f));
 
-    long long tot_flagged_cells = 0, tot_cells = 0;
+    // Cross-hand Stokes need both beams built from the same antenna set.
+    const int pol_lock = (opt.iquv || opt.stokes != 0) ? 1 : 0;
 
     // ---- per-subband streaming ---------------------------------------------
     for (int sb = sb_lo; sb <= sb_hi; sb++) {
@@ -606,6 +772,13 @@ static int run_filterbank(const FilOpts &opt) {
                    n_used, opt.l, opt.m);
         CUDA_CHECK(cudaMemcpy(d_w, w.data(), w.size() * 4,
                               cudaMemcpyHostToDevice));
+        if (opt.rfi) {
+            // Per-(ch, pol) unflagged antenna count for THIS subband's
+            // weights — the reference a fully-clean window normalizes to,
+            // so --rfi is a no-op wherever nothing trips.
+            k_nref<<<1, NCHAN_SB>>>(d_w, d_nref);
+            CUDA_CHECK(cudaGetLastError());
+        }
 
         // -m: dedisperse this subband's raw voltages in host RAM first
         std::vector<unsigned char> ddbuf;
@@ -637,81 +810,50 @@ static int run_filterbank(const FilOpts &opt) {
             if (opt.rfi) {
                 dim3 g(NANT, nwin);
                 k_autos<<<g, NCHAN_SB>>>(d_raw, d_autos, opt.rfi_m);
-                CUDA_CHECK(cudaMemcpy(h_autos.data(), d_autos,
-                                      h_autos.size() * 4,
-                                      cudaMemcpyDeviceToHost));
-                // SK mask on host: flag (win, ant, pol) if ANY channel's SK
-                // trips (channel-resolved masking costs a [win][ant][ch][pol]
-                // mask; realtime combines detectors per (ant,pol) similarly
-                // before zeroing — see dsart/rfi/combine.py). We flag the
-                // (win, ant, pol) cell when >1% of its channels trip, which
-                // suppresses broadband bursts without killing an antenna for
-                // a single hot channel.
-                const float m_ = (float)opt.rfi_m;
-                const float c1 = (m_ + 1.f) / (m_ - 1.f);
-                for (int win = 0; win < nwin; win++) {
-                    for (int a = 0; a < NANT; a++) {
-                        for (int p = 0; p < NPOL; p++) {
-                            int ntrip = 0;
-                            for (int ch = 0; ch < NCHAN_SB; ch++) {
-                                const size_t o =
-                                    ((((size_t)win * NANT + a) * NCHAN_SB + ch) *
-                                     NPOL + p) * 2;
-                                const float s1 = h_autos[o];
-                                const float s2 = h_autos[o + 1];
-                                if (s1 <= 0.f) continue;
-                                const float sk =
-                                    c1 * (m_ * s2 / (s1 * s1) - 1.f);
-                                if (sk < sk_lo || sk > sk_hi) ntrip++;
-                            }
-                            const bool bad = ntrip > NCHAN_SB / 100;
-                            h_mask[((size_t)win * NANT + a) * NPOL + p] =
-                                bad ? 1 : 0;
-                            if (bad) tot_flagged_cells++;
-                            tot_cells++;
-                        }
-                    }
-                }
-                // per-(win,pol) renormalization by live antenna count
-                for (int win = 0; win < nwin; win++) {
-                    for (int p = 0; p < NPOL; p++) {
-                        int live = 0;
-                        for (int a = 0; a < NANT; a++)
-                            if (wo.use[a] &&
-                                !h_mask[((size_t)win * NANT + a) * NPOL + p])
-                                live++;
-                        h_wnorm[(size_t)win * NPOL + p] =
-                            live > 0 ? (float)n_used / (float)live : 0.f;
-                    }
-                }
-                CUDA_CHECK(cudaMemcpy(d_mask, h_mask.data(), h_mask.size(),
-                                      cudaMemcpyHostToDevice));
-                CUDA_CHECK(cudaMemcpy(d_wnorm, h_wnorm.data(),
-                                      h_wnorm.size() * 4,
-                                      cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaGetLastError());
+                // Channel-resolved SK verdict per (win, ant, ch, pol), then
+                // the per-(win, ch, pol) live count -> voltage rescale.
+                k_skmask<<<g, NCHAN_SB>>>(d_autos, d_w, opt.rfi_m,
+                                          sk_lo, sk_hi, pol_lock,
+                                          d_mask, d_counts);
+                CUDA_CHECK(cudaGetLastError());
+                k_rfiscale<<<nwin, NCHAN_SB>>>(
+                    d_mask, d_w, d_nref, opt.rfi_norm,
+                    (float)opt.rfi_min_live, d_scale, d_counts);
+                CUDA_CHECK(cudaGetLastError());
             }
 
-            k_beamform<<<T_PER_BLOCK, NCHAN_SB>>>(
-                d_raw, d_w, opt.rfi ? d_mask : nullptr,
-                opt.rfi ? d_wnorm : nullptr, opt.rfi ? opt.rfi_m : T_PER_BLOCK,
-                opt.stokes, d_pow);
-            CUDA_CHECK(cudaMemcpy(h_pow.data(), d_pow, h_pow.size() * 4,
-                                  cudaMemcpyDeviceToHost));
-
-            // scatter into the full-band buffer
+            // beamform each requested Stokes from the same resident block,
+            // then scatter into the matching full-band buffer.
             const long long t0 = (long long)b * T_PER_BLOCK;
-            for (int t = 0; t < T_PER_BLOCK; t++) {
-                float *dst = &full[(t0 + t) * nchan_out + ch_off];
-                memcpy(dst, &h_pow[(size_t)t * NCHAN_SB], NCHAN_SB * 4);
+            for (size_t si = 0; si < stokes_list.size(); si++) {
+                k_beamform<<<T_PER_BLOCK, NCHAN_SB>>>(
+                    d_raw, d_w, opt.rfi ? d_mask : nullptr,
+                    opt.rfi ? d_scale : nullptr,
+                    opt.rfi ? opt.rfi_m : T_PER_BLOCK, stokes_list[si], d_pow);
+                CUDA_CHECK(cudaMemcpy(h_pow.data(), d_pow, h_pow.size() * 4,
+                                      cudaMemcpyDeviceToHost));
+                for (int t = 0; t < T_PER_BLOCK; t++) {
+                    float *dst = &full[si][(t0 + t) * nchan_out + ch_off];
+                    memcpy(dst, &h_pow[(size_t)t * NCHAN_SB], NCHAN_SB * 4);
+                }
             }
         }
         if (f) fclose(f);
         printf("subband %02d done (%s)\n", sb, frags[sb].c_str());
     }
 
-    if (opt.rfi && tot_cells)
-        printf("RFI: flagged %.2f%% of (win,ant,pol) cells\n",
-               100.0 * tot_flagged_cells / tot_cells);
+    if (opt.rfi) {
+        unsigned long long h_counts[3] = {0, 0, 0};
+        CUDA_CHECK(cudaMemcpy(h_counts, d_counts, sizeof h_counts,
+                              cudaMemcpyDeviceToHost));
+        if (h_counts[1])
+            printf("RFI: flagged %.3f%% of (win,ant,ch,pol) cells "
+                   "(%llu / %llu); %llu (win,ch,pol) cells blanked below "
+                   "min-live\n",
+                   100.0 * (double)h_counts[0] / (double)h_counts[1],
+                   h_counts[0], h_counts[1], h_counts[2]);
+    }
 
     // ---- dedispersion shifts (integer native samples, ref = band top) ------
     std::vector<long long> shift(nchan_out, 0);
@@ -731,39 +873,54 @@ static int run_filterbank(const FilOpts &opt) {
     }
 
     // ---- write SIGPROC ------------------------------------------------------
-    FILE *fo = fopen(opt.out_fil.c_str(), "wb");
-    if (!fo) {
-        fprintf(stderr, "cannot open %s\n", opt.out_fil.c_str());
-        return 1;
-    }
-    FilHeader hdr;
-    hdr.source_name = opt.event.empty() ? "bbproc" : opt.event;
-    hdr.nchans = nchan_out;
-    hdr.fch1_mhz = freq_mhz(sb_lo == sb_hi ? sb_lo : 0, 0);
-    hdr.foff_mhz = -DF_MHZ;
-    hdr.tsamp_s = TSAMP_S * opt.tscrunch;
-    hdr.tstart_mjd = tstart_mjd;
-    hdr.telescope_id = opt.telescope_id;
-    write_fil_header(fo, hdr);
-
+    // One float32 .fil per requested Stokes. In --iquv mode the output name
+    // gets an "_I"/"_Q"/"_U"/"_V" tag before the ".fil" extension; single-
+    // Stokes mode keeps the exact -P name. All share identical headers and
+    // dedispersion, so the four planes are channel/time aligned.
     const long long nt_out = ntime / opt.tscrunch;
     std::vector<float> row(nchan_out);
-    for (long long to = 0; to < nt_out; to++) {
-        for (int ch = 0; ch < nchan_out; ch++) {
-            float acc = 0.f;
-            const long long tbase = to * opt.tscrunch + shift[ch];
-            for (int k = 0; k < opt.tscrunch; k++) {
-                const long long t = tbase + k;
-                if (t >= 0 && t < ntime) acc += full[t * nchan_out + ch];
-            }
-            row[ch] = acc / opt.tscrunch;
+    for (size_t si = 0; si < stokes_list.size(); si++) {
+        std::string outname = opt.out_fil;
+        if (opt.iquv) {
+            const std::string tag = std::string("_") + STK[stokes_list[si]];
+            const size_t dot = outname.rfind(".fil");
+            if (dot != std::string::npos) outname.insert(dot, tag);
+            else outname += tag;
         }
-        fwrite(row.data(), 4, nchan_out, fo);
+        FILE *fo = fopen(outname.c_str(), "wb");
+        if (!fo) {
+            fprintf(stderr, "cannot open %s\n", outname.c_str());
+            return 1;
+        }
+        FilHeader hdr;
+        hdr.source_name = (opt.event.empty() ? "bbproc" : opt.event) +
+                          (opt.iquv ? std::string("_") + STK[stokes_list[si]]
+                                    : std::string());
+        hdr.nchans = nchan_out;
+        hdr.fch1_mhz = freq_mhz(sb_lo == sb_hi ? sb_lo : 0, 0);
+        hdr.foff_mhz = -DF_MHZ;
+        hdr.tsamp_s = TSAMP_S * opt.tscrunch;
+        hdr.tstart_mjd = tstart_mjd;
+        hdr.telescope_id = opt.telescope_id;
+        write_fil_header(fo, hdr);
+
+        for (long long to = 0; to < nt_out; to++) {
+            for (int ch = 0; ch < nchan_out; ch++) {
+                float acc = 0.f;
+                const long long tbase = to * opt.tscrunch + shift[ch];
+                for (int k = 0; k < opt.tscrunch; k++) {
+                    const long long t = tbase + k;
+                    if (t >= 0 && t < ntime) acc += full[si][t * nchan_out + ch];
+                }
+                row[ch] = acc / opt.tscrunch;
+            }
+            fwrite(row.data(), 4, nchan_out, fo);
+        }
+        fclose(fo);
+        printf("wrote %s: %lld samples x %d chans, tsamp %.3f us, tstart MJD "
+               "%.9f\n", outname.c_str(), nt_out, nchan_out,
+               hdr.tsamp_s * 1e6, tstart_mjd);
     }
-    fclose(fo);
-    printf("wrote %s: %lld samples x %d chans, tsamp %.3f us, tstart MJD "
-           "%.9f\n", opt.out_fil.c_str(), nt_out, nchan_out,
-           hdr.tsamp_s * 1e6, tstart_mjd);
 
     cudaFreeHost(h_block);
     cudaFree(d_raw);
@@ -771,7 +928,9 @@ static int run_filterbank(const FilOpts &opt) {
     cudaFree(d_pow);
     if (d_autos) cudaFree(d_autos);
     if (d_mask) cudaFree(d_mask);
-    if (d_wnorm) cudaFree(d_wnorm);
+    if (d_scale) cudaFree(d_scale);
+    if (d_nref) cudaFree(d_nref);
+    if (d_counts) cudaFree(d_counts);
     return 0;
 }
 
@@ -1093,8 +1252,19 @@ static void usage() {
         "  --tscrunch <n>    time integration [8] (262 us)\n"
         "  --dm <pc/cc>      integer-shift intra-channel dedispersion\n"
         "  --stokes <n>      0=I 1=Q 2=U 3=V [0]\n"
-        "  --rfi             SK RFI flagging (realtime-equivalent stats)\n"
+        "  --iquv            write all four Stokes (I,Q,U,V) from one\n"
+        "                    voltage pass -> <out>_{I,Q,U,V}.fil\n"
+        "  --rfi             SK RFI flagging, per (win, ant, ch, pol)\n"
+        "                    (realtime-equivalent stats + granularity)\n"
         "  --rfi-m <n>       SK window in native samples [256]\n"
+        "  --rfi-norm <s>    rescale of a partly-flagged cell:\n"
+        "                    noise = keep the noise floor stationary\n"
+        "                            (default; what a .fil search wants)\n"
+        "                    amp   = keep the signal amplitude fixed\n"
+        "                            (pre-2026-08-02 behaviour)\n"
+        "                    none  = no rescale\n"
+        "  --rfi-min-live <f> blank a (win, ch, pol) cell when fewer than\n"
+        "                    this fraction of its antennas survive [0.25]\n"
         "  --mjd <mjd>       tstart override (else from manifest)\n"
         "  --telescope-id <n> SIGPROC telescope_id [0]\n"
         "\n"
@@ -1124,7 +1294,8 @@ int main(int argc, char *argv[]) {
 
     enum { OPT_L = 1000, OPT_M, OPT_CORE, OPT_TSCR, OPT_DM, OPT_STOKES,
            OPT_RFI, OPT_RFIM, OPT_MJD, OPT_GPU, OPT_PHONLY, OPT_SWAP,
-           OPT_SB, OPT_TELID, OPT_DEC };
+           OPT_SB, OPT_TELID, OPT_DEC, OPT_IQUV, OPT_RFINORM,
+           OPT_RFIMINLIVE };
     static struct option lopts[] = {
         {"l", required_argument, nullptr, OPT_L},
         {"dec-deg", required_argument, nullptr, OPT_DEC},
@@ -1133,8 +1304,11 @@ int main(int argc, char *argv[]) {
         {"tscrunch", required_argument, nullptr, OPT_TSCR},
         {"dm", required_argument, nullptr, OPT_DM},
         {"stokes", required_argument, nullptr, OPT_STOKES},
+        {"iquv", no_argument, nullptr, OPT_IQUV},
         {"rfi", no_argument, nullptr, OPT_RFI},
         {"rfi-m", required_argument, nullptr, OPT_RFIM},
+        {"rfi-norm", required_argument, nullptr, OPT_RFINORM},
+        {"rfi-min-live", required_argument, nullptr, OPT_RFIMINLIVE},
         {"mjd", required_argument, nullptr, OPT_MJD},
         {"gpu", required_argument, nullptr, OPT_GPU},
         {"phase-only", no_argument, nullptr, OPT_PHONLY},
@@ -1172,8 +1346,19 @@ int main(int argc, char *argv[]) {
             case OPT_TSCR: fo.tscrunch = atoi(optarg); break;
             case OPT_DM: fo.dm = atof(optarg); break;
             case OPT_STOKES: fo.stokes = atoi(optarg); break;
+            case OPT_IQUV: fo.iquv = true; break;
             case OPT_RFI: fo.rfi = true; break;
             case OPT_RFIM: fo.rfi_m = atoi(optarg); break;
+            case OPT_RFINORM:
+                if (!strcmp(optarg, "none")) fo.rfi_norm = 0;
+                else if (!strcmp(optarg, "noise")) fo.rfi_norm = 1;
+                else if (!strcmp(optarg, "amp")) fo.rfi_norm = 2;
+                else {
+                    fprintf(stderr, "--rfi-norm must be none|noise|amp\n");
+                    return 1;
+                }
+                break;
+            case OPT_RFIMINLIVE: fo.rfi_min_live = atof(optarg); break;
             case OPT_MJD: fo.mjd_override = atof(optarg); break;
             case OPT_GPU: fo.gpu = atoi(optarg); vo.gpu = atoi(optarg); break;
             case OPT_PHONLY: fo.phase_only = true; vo.phase_only = true; break;
